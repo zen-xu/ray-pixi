@@ -7,7 +7,7 @@ authors = [
     { name = "ZhengYu Xu", email = "zen-xu@outlook.com" },
 ]
 requires-python = ">=3.13"
-dependencies = ["ray>=2.50"]
+dependencies = ["ray>=2.50", "tomli-w>=1.0"]
 
 [build-system]
 requires = ["hatchling", "hatch-vcs"]
@@ -23,6 +23,7 @@ packages = ["src/ray_pixi"]
 dev = [
     "ruff>=0.15",
     "ty>=0.0.39",
+    "pytest>=8",
 ]
 
 [tool.ruff]
@@ -51,3 +52,7 @@ docstring-code-format = true
 
 [tool.ty.environment]
 root = ["./src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
