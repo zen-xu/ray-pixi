@@ -1,0 +1,47 @@
+[project]
+name = "ray-pixi"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "ZhengYu Xu", email = "zen-xu@outlook.com" },
+]
+requires-python = ">=3.13"
+dependencies = ["ray>=2.50"]
+
+[build-system]
+requires = ["uv_build>=0.9.28,<0.10.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15",
+    "ty>=0.0.39",
+]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 88
+src = ["src"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "UP",  # pyupgrade
+    "SIM", # flake8-simplify
+    "RUF", # ruff-specific rules
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["ray_pixi"]
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.ty.environment]
+root = ["./src"]
