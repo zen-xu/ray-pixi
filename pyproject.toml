@@ -1,6 +1,6 @@
 [project]
 name = "ray-pixi"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Add your description here"
 readme = "README.md"
 authors = [
@@ -10,8 +10,14 @@ requires-python = ">=3.13"
 dependencies = ["ray>=2.50"]
 
 [build-system]
-requires = ["uv_build>=0.9.28,<0.10.0"]
-build-backend = "uv_build"
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ray_pixi"]
 
 [dependency-groups]
 dev = [
