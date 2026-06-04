@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import hashlib
-import os
 from typing import Any, Literal, overload
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, model_validator
 
 INLINE_KEYS = ("channels", "dependencies", "pypi_dependencies", "platforms")
 
@@ -16,10 +15,10 @@ class PixiSpec(BaseModel):
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
-    manifest_content: str | None = None
-    manifest_format: Literal["pixi.toml", "pyproject.toml"] = "pixi.toml"
-    manifest_path: str | None = Field(default=None, alias="manifest")
-    lock_content: str | None = None
+    # Project mode: a manifest + include globs resolved against the working_dir.
+    manifest: str | None = None
+    include: list[str] = []
+    # Inline mode: dependency keys synthesized into a pixi.toml on each node.
     channels: list[str] = []
     # Values are a version string ("3.13.*") or a pixi match-spec table
     # ({"version": ">=1.0", "build": "...", "channel": "..."} / {"git": ...}).
@@ -32,31 +31,30 @@ class PixiSpec(BaseModel):
     pixi_install_options: list[str] = []
 
     @property
-    def source(self) -> Literal["manifest", "inline"]:
-        """Whether the spec is backed by a manifest or by inline dependency keys."""
-        return "manifest" if (self.manifest_content or self.manifest_path) else "inline"
-
-    @model_validator(mode="after")
-    def _require_exactly_one_source(self) -> PixiSpec:
-        """Require exactly one of: a manifest, or inline dependency keys."""
-        has_manifest = bool(self.manifest_content or self.manifest_path)
+    def source(self) -> Literal["inline", "project"]:
+        """Inline dependency keys -> "inline"; otherwise a working_dir project."""
         has_inline = bool(
             self.channels
             or self.dependencies
             or self.pypi_dependencies
             or self.platforms
         )
-        if has_manifest and has_inline:
+        return "inline" if has_inline else "project"
+
+    @model_validator(mode="after")
+    def _reject_inline_with_project(self) -> PixiSpec:
+        """Inline dependency keys and project keys (manifest/include) are exclusive."""
+        has_inline = bool(
+            self.channels
+            or self.dependencies
+            or self.pypi_dependencies
+            or self.platforms
+        )
+        has_project = bool(self.manifest or self.include)
+        if has_inline and has_project:
             raise ValueError(
-                "runtime_env['pixi'] cannot specify both a manifest "
-                "(manifest/manifest_content) and inline spec keys "
-                f"({', '.join(INLINE_KEYS)})."
-            )
-        if not has_manifest and not has_inline:
-            raise ValueError(
-                "runtime_env['pixi'] must specify either a manifest "
-                "(manifest=...) or inline spec keys "
-                f"({', '.join(INLINE_KEYS)})."
+                "runtime_env['pixi'] cannot specify both inline spec keys "
+                f"({', '.join(INLINE_KEYS)}) and project keys (manifest/include)."
             )
         return self
 
@@ -78,13 +76,11 @@ def normalize(field: str | dict) -> PixiSpec:
 
 
 def compute_uri(field: str | dict) -> str:
-    """Compute a deterministic cache URI ``pixi://<sha1>`` from the field content.
+    """Compute a deterministic cache URI ``pixi://<sha1>`` from an inline field.
 
-    Only depends on the serialized field content (no local file reads) so every
-    node's agent derives the same URI. Note: a bare-path field (``{"manifest":
-    "p.toml"}`` not built via :func:`pixi`) is hashed by its path string, not the
-    file content, so edits won't invalidate the cache and different nodes sharing
-    a path may collide. Build the field with :func:`pixi` to hash content instead.
+    Hashes the serialized normalized field so every node derives the same URI for
+    the same inline spec. For project mode, use ``project.compute_project_uri``
+    instead, which hashes the working_dir file subset.
     """
     canonical = normalize(field).model_dump_json()
     digest = hashlib.sha1(canonical.encode("utf-8")).hexdigest()
@@ -93,30 +89,15 @@ def compute_uri(field: str | dict) -> str:
 
 @overload
 def pixi(
-    manifest: str,
+    manifest: str | None = ...,
     *,
+    include: list[str] | None = ...,
     environment: str = ...,
     locked: bool = ...,
     pixi_version: str | None = ...,
     pixi_install_options: list[str] | None = ...,
 ) -> dict:
-    """Build the pixi field from a manifest file (manifest mode).
-
-    Reads ``manifest`` (a ``pixi.toml`` / ``pyproject.toml``) and, if present, the
-    sibling ``pixi.lock`` on the driver, inlining their content into the returned
-    dict so the worker nodes need not have the files. Cannot be combined with the
-    inline spec keys.
-
-    Args:
-        manifest: Path to a ``pixi.toml`` / ``pyproject.toml``.
-        environment: pixi environment to select (pixi ``-e``).
-        locked: Reproduce strictly from ``pixi.lock`` (``pixi install --locked``).
-        pixi_version: Bootstrap this exact pixi version on the node if set.
-        pixi_install_options: Extra flags forwarded to ``pixi install``.
-
-    Returns:
-        A dict suitable as ``runtime_env["pixi"]``.
-    """
+    """Build the pixi field in project mode (manifest + include via working_dir)."""
 
 
 @overload
@@ -131,33 +112,13 @@ def pixi(
     pixi_version: str | None = ...,
     pixi_install_options: list[str] | None = ...,
 ) -> dict:
-    """Build the pixi field from inline dependency keys (inline mode).
-
-    The plugin synthesizes a minimal ``pixi.toml`` from these keys on each node.
-    Cannot be combined with a manifest path.
-
-    Args:
-        channels: Conda channels, e.g. ``["conda-forge"]``.
-        dependencies: Conda dependencies; each value is a version string
-            (``"==3.13.12"``) or a match-spec table
-            (``{"version": "3.13.*", "channel": "conda-forge"}``).
-        pypi_dependencies: PyPI dependencies; each value is a version string or a
-            table (``{"version": ">=22", "extras": ["d"]}`` or
-            ``{"git": "https://...", "rev": "main"}``).
-        platforms: Target platforms; defaults to the building node's platform.
-        environment: pixi environment to select (pixi ``-e``).
-        locked: Reproduce strictly from ``pixi.lock`` (``pixi install --locked``).
-        pixi_version: Bootstrap this exact pixi version on the node if set.
-        pixi_install_options: Extra flags forwarded to ``pixi install``.
-
-    Returns:
-        A dict suitable as ``runtime_env["pixi"]``.
-    """
+    """Build the pixi field in inline mode (dependency keys)."""
 
 
 def pixi(
     manifest: str | None = None,
     *,
+    include: list[str] | None = None,
     channels: list[str] | None = None,
     dependencies: dict[str, str | dict] | None = None,
     pypi_dependencies: dict[str, str | dict] | None = None,
@@ -167,74 +128,35 @@ def pixi(
     pixi_version: str | None = None,
     pixi_install_options: list[str] | None = None,
 ) -> dict:
-    """Build a self-contained ``runtime_env["pixi"]`` field on the driver.
+    """Assemble a ``runtime_env["pixi"]`` dict. Optional convenience over a raw dict.
 
-    This is the recommended way to construct the pixi field. It runs on the driver
-    and produces a plain dict that Ray serializes and ships to every node, where the
-    ``PixiPlugin`` installs the environment and launches workers inside it.
+    Two mutually exclusive modes:
 
-    There are two mutually exclusive modes:
-
-    * **Manifest mode** -- pass ``manifest``, a path to a ``pixi.toml`` or
-      ``pyproject.toml``. The file is read on the driver and its content is inlined
-      into the returned dict; if a ``pixi.lock`` sits next to it, that is inlined
-      too (so ``locked=True`` can reproduce it exactly). Because the content travels
-      with the field, the manifest does not need to exist on the worker nodes.
+    * **Project mode** -- pass ``manifest`` (a working_dir-relative path, or omit for
+      auto-discovery) and/or ``include`` (globs selecting the env-defining files:
+      pyproject.toml, local package sources). Files are NOT read here; they travel
+      via Ray's ``working_dir`` and are collected on each node. Set
+      ``runtime_env["working_dir"]`` so the files reach the workers.
     * **Inline mode** -- pass any of ``channels`` / ``dependencies`` /
-      ``pypi_dependencies`` / ``platforms``. The plugin synthesizes a minimal
-      ``pixi.toml`` from them on each node.
-
-    Prefer this helper over putting a bare path in ``runtime_env["pixi"]``
-    (e.g. ``{"pixi": "pixi.toml"}``): inlined content is cached by content, so edits
-    invalidate the cache and different nodes never collide on the same hash, whereas
-    a bare path is cached by its path string. See :func:`compute_uri`.
+      ``pypi_dependencies`` / ``platforms``. A minimal pixi.toml is synthesized on
+      each node.
 
     Args:
-        manifest: Path to a ``pixi.toml`` / ``pyproject.toml`` (manifest mode).
-            Mutually exclusive with the inline keys below.
-        channels: Conda channels, e.g. ``["conda-forge"]`` (inline mode).
-        dependencies: Conda dependencies mapping a package name to a version string
-            (``{"python": "==3.13.12"}``) or a pixi match-spec table
-            (``{"python": {"version": "3.13.*", "channel": "conda-forge"}}``).
-        pypi_dependencies: PyPI dependencies, each value a version string or a table
-            (``{"black": {"version": ">=22", "extras": ["d"]}}``,
-            ``{"pkg": {"git": "https://...", "rev": "main"}}``).
-        platforms: Target platforms, e.g. ``["linux-64"]``. Defaults to the building
-            node's platform when omitted.
-        environment: Name of the pixi environment to select (pixi ``-e``).
-        locked: Reproduce strictly from ``pixi.lock`` (passes ``--locked`` to
-            ``pixi install``).
-        pixi_version: If set, bootstrap this exact pixi version on the node instead
-            of using the ``pixi`` already on ``PATH``.
-        pixi_install_options: Extra flags forwarded verbatim to ``pixi install``.
+        manifest: working_dir-relative path to a pixi.toml / pyproject.toml
+            (project mode). Mutually exclusive with the inline keys.
+        include: globs (relative to working_dir) selecting files into the env cache
+            hash (project mode).
+        channels/dependencies/pypi_dependencies/platforms: inline mode keys.
+        environment: pixi environment to select (pixi ``-e``).
+        locked: reproduce strictly from pixi.lock (``pixi install --locked``).
+        pixi_version: bootstrap this exact pixi version on the node if set.
+        pixi_install_options: extra flags forwarded to ``pixi install``.
 
     Returns:
         A dict suitable as ``runtime_env["pixi"]``.
 
     Raises:
-        ValueError: If both a manifest and inline keys are given, or neither.
-        FileNotFoundError: If ``manifest`` does not point to an existing file.
-
-    Note:
-        The pixi environment must provide a ``python`` and ``ray`` that match the
-        cluster exactly, down to the micro version; ray-pixi does not inject them.
-
-    Examples:
-        From a manifest, reproduced from its lockfile::
-
-            ray.init(runtime_env={"pixi": pixi("pixi.toml", locked=True)})
-
-        Declared inline, pinned to the cluster's versions::
-
-            ray.init(
-                runtime_env={
-                    "pixi": pixi(
-                        channels=["conda-forge"],
-                        dependencies={"python": "==3.13.12"},
-                        pypi_dependencies={"ray": "==2.55.1"},
-                    )
-                }
-            )
+        ValueError: if both project keys and inline keys are given.
     """
     inline = {
         "channels": channels,
@@ -243,13 +165,13 @@ def pixi(
         "platforms": platforms,
     }
     has_inline = any(v is not None for v in inline.values())
+    has_project = manifest is not None or include is not None
 
-    if manifest is not None and has_inline:
+    if has_inline and has_project:
         raise ValueError(
-            "pixi() cannot take both a manifest path and inline spec keys."
+            "pixi() cannot take both project keys (manifest/include) and inline "
+            "spec keys."
         )
-    if manifest is None and not has_inline:
-        raise ValueError("pixi() must take either a manifest path or inline spec keys.")
 
     common = {
         "environment": environment,
@@ -258,32 +180,13 @@ def pixi(
         "pixi_install_options": list(pixi_install_options or []),
     }
 
-    if manifest is not None:
-        with open(manifest, encoding="utf-8") as f:
-            manifest_content = f.read()
-        manifest_format = (
-            "pyproject.toml"
-            if os.path.basename(manifest) == "pyproject.toml"
-            else "pixi.toml"
-        )
-        lock_path = os.path.join(
-            os.path.dirname(os.path.abspath(manifest)), "pixi.lock"
-        )
-        lock_content = None
-        if os.path.exists(lock_path):
-            with open(lock_path, encoding="utf-8") as f:
-                lock_content = f.read()
+    if has_inline:
         return {
-            "manifest_content": manifest_content,
-            "manifest_format": manifest_format,
-            "lock_content": lock_content,
+            "channels": list(channels or []),
+            "dependencies": dict(dependencies or {}),
+            "pypi_dependencies": dict(pypi_dependencies or {}),
+            "platforms": list(platforms or []),
             **common,
         }
 
-    return {
-        "channels": list(channels or []),
-        "dependencies": dict(dependencies or {}),
-        "pypi_dependencies": dict(pypi_dependencies or {}),
-        "platforms": list(platforms or []),
-        **common,
-    }
+    return {"manifest": manifest, "include": list(include or []), **common}

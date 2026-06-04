@@ -34,3 +34,46 @@ def test_pixi_runtime_env_end_to_end():
         assert os.path.join(".pixi", "envs", "default") in exe
     finally:
         ray.shutdown()
+
+
+def test_pixi_project_mode_end_to_end(tmp_path):
+    import ray
+
+    from ray_pixi import pixi
+
+    os.environ["RAY_RUNTIME_ENV_PLUGINS"] = '[{"class": "ray_pixi.PixiPlugin"}]'
+
+    from ray_pixi import manifest as _manifest
+
+    py = _manifest.current_python_version()
+    ray_ver = _manifest.current_ray_version()
+    (tmp_path / "pixi.toml").write_text(
+        "[workspace]\n"
+        'channels = ["conda-forge"]\n'
+        'platforms = ["linux-64"]\n'
+        "\n"
+        "[dependencies]\n"
+        f'python = "=={py}"\n'
+        "\n"
+        "[pypi-dependencies]\n"
+        f'ray = {{ version = "=={ray_ver}", extras = ["default"] }}\n'
+    )
+
+    ray.init(
+        runtime_env={
+            "pixi": pixi(manifest="pixi.toml"),
+            "working_dir": str(tmp_path),
+        }
+    )
+    try:
+
+        @ray.remote
+        def where():
+            import sys
+
+            return sys.executable
+
+        exe = ray.get(where.remote())
+        assert os.path.join(".pixi", "envs", "default") in exe
+    finally:
+        ray.shutdown()

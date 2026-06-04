@@ -1,11 +1,10 @@
-"""Materialize a normalized pixi spec into pixi.toml (+ pixi.lock) in a target dir."""
+"""Synthesize an inline pixi spec into pixi.toml and probe installed versions."""
 
 from __future__ import annotations
 
 import glob
 import os
 import platform
-import shutil
 import sys
 
 import tomli_w
@@ -109,36 +108,8 @@ def synthesize_pixi_toml(pixi_spec: PixiSpec) -> str:
 
 
 def materialize(pixi_spec: PixiSpec, target_dir: str) -> str:
-    """Write the manifest into target_dir and return the pixi.toml path.
-
-    Resolution order (v1): (1) inlined content, (2) manifest_path on the agent FS.
-    """
+    """Synthesize an inline spec into target_dir/pixi.toml and return its path."""
     manifest_path = os.path.join(target_dir, "pixi.toml")
-    lock_path = os.path.join(target_dir, "pixi.lock")
-
-    if pixi_spec.source == "inline":
-        with open(manifest_path, "w", encoding="utf-8") as f:
-            f.write(synthesize_pixi_toml(pixi_spec))
-        return manifest_path
-
-    # source == "manifest"
-    if pixi_spec.manifest_content is not None:
-        with open(manifest_path, "w", encoding="utf-8") as f:
-            f.write(pixi_spec.manifest_content)
-        if pixi_spec.lock_content is not None:
-            with open(lock_path, "w", encoding="utf-8") as f:
-                f.write(pixi_spec.lock_content)
-        return manifest_path
-
-    src = pixi_spec.manifest_path
-    if not src or not os.path.exists(src):
-        raise ValueError(
-            f"pixi runtime_env could not locate manifest {src!r} on this node. "
-            "Use ray_pixi.pixi(<path>) on the driver to inline the manifest, "
-            "or ensure the file exists on every node."
-        )
-    shutil.copyfile(src, manifest_path)
-    src_lock = os.path.join(os.path.dirname(os.path.abspath(src)), "pixi.lock")
-    if os.path.exists(src_lock):
-        shutil.copyfile(src_lock, lock_path)
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        f.write(synthesize_pixi_toml(pixi_spec))
     return manifest_path

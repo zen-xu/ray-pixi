@@ -13,7 +13,7 @@ from ray._common.utils import try_to_create_directory
 from ray._private.runtime_env.plugin import RuntimeEnvPlugin
 from ray._private.utils import get_directory_size_bytes
 
-from ray_pixi import binary, spec
+from ray_pixi import binary, manifest, project, spec
 from ray_pixi.processor import PixiProcessor
 
 default_logger = logging.getLogger(__name__)
@@ -66,19 +66,78 @@ class PixiPlugin(RuntimeEnvPlugin):
         field = runtime_env.get("pixi")
         if not field:
             return []
-        return [spec.compute_uri(field)]
+        pixi_spec = spec.normalize(field)
+        if pixi_spec.source == "inline":
+            return [spec.compute_uri(field)]
+        # get_uris runs in the agent's increase_reference phase, before Ray has
+        # downloaded the working_dir, so its files cannot be read here. Derive
+        # the cache key from the working_dir URI Ray already computed (it embeds
+        # a content hash of the whole working_dir, pixi.lock included).
+        working_dir_uri = runtime_env.get("working_dir", "")
+        if not working_dir_uri:
+            raise ValueError(
+                "pixi project mode requires runtime_env['working_dir'] so the "
+                "manifest and sources reach the workers."
+            )
+        return [
+            project.compute_project_uri_from_working_dir_uri(
+                pixi_spec, working_dir_uri
+            )
+        ]
+
+    def _resolve_pixi(self, pixi_spec: spec.PixiSpec, target_dir: str) -> str:
+        if pixi_spec.pixi_version:
+            bootstrap_dir = os.path.join(
+                self._resource_dir, "pixi-bin", pixi_spec.pixi_version
+            )
+            return binary.resolve_pixi(bootstrap_dir, pixi_spec.pixi_version)
+        return binary.resolve_pixi(target_dir, None)
 
     async def create(self, uri, runtime_env, context, logger=default_logger) -> int:
         if not runtime_env.get("pixi"):
             return 0
+        pixi_spec = spec.normalize(runtime_env["pixi"])
         target_dir = self._target_dir(uri)
 
         async def _create() -> int:
-            await PixiProcessor(target_dir, runtime_env, logger).run()
-            loop = asyncio.get_running_loop()
-            return await loop.run_in_executor(
-                None, get_directory_size_bytes, target_dir
-            )
+            os.makedirs(target_dir, exist_ok=True)
+            try:
+                pixi_exe = self._resolve_pixi(pixi_spec, target_dir)
+                if pixi_spec.source == "inline":
+                    manifest_path = manifest.materialize(pixi_spec, target_dir)
+                else:
+                    # create runs inside Ray's with_working_dir_env context, so
+                    # the working_dir is downloaded and its local path is exposed
+                    # via the env var (unlike get_uris, which only sees the URI).
+                    working_dir = project.resolve_working_dir()
+                    if not working_dir:
+                        raise ValueError(
+                            "pixi project mode requires runtime_env['working_dir']."
+                        )
+                    manifest_path = project.materialize_project(
+                        pixi_spec, working_dir, target_dir
+                    )
+                await PixiProcessor(
+                    target_dir, manifest_path, pixi_spec, pixi_exe, logger
+                ).run()
+                loop = asyncio.get_running_loop()
+                return await loop.run_in_executor(
+                    None, get_directory_size_bytes, target_dir
+                )
+            except Exception:
+                logger.exception("Failed to install pixi environment.")
+                # Remove the broken target dir by default to reclaim space. Set
+                # RAY_PIXI_KEEP_ON_FAILURE=1 to keep it so the failed install can
+                # be inspected (e.g. a worker pod's pixi build error).
+                if os.environ.get("RAY_PIXI_KEEP_ON_FAILURE") == "1":
+                    logger.warning(
+                        "Keeping %s for inspection; unset "
+                        "RAY_PIXI_KEEP_ON_FAILURE to remove it on failure.",
+                        target_dir,
+                    )
+                else:
+                    shutil.rmtree(target_dir, ignore_errors=True)
+                raise
 
         if uri not in self._create_locks:
             self._create_locks[uri] = asyncio.Lock()
@@ -107,8 +166,11 @@ class PixiPlugin(RuntimeEnvPlugin):
                 "Something may have gone wrong while installing the pixi runtime_env."
             )
 
-        pixi_exe = binary.resolve_pixi(target_dir, pixi_spec.pixi_version)
-        manifest_path = os.path.join(target_dir, "pixi.toml")
+        pixi_exe = self._resolve_pixi(pixi_spec, target_dir)
+        if pixi_spec.source == "inline":
+            manifest_path = os.path.join(target_dir, "pixi.toml")
+        else:
+            manifest_path = project.main_manifest_path(pixi_spec, target_dir)
         context.py_executable = (
             f"{pixi_exe} run --manifest-path {manifest_path} -e {env_name} python"
         )

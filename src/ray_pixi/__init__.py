@@ -4,8 +4,14 @@ Register the plugin by setting, on every node before it starts::
 
     RAY_RUNTIME_ENV_PLUGINS = '[{"class": "ray_pixi.PixiPlugin"}]'
 
-The Ray runtime_env agent reads that variable at startup. Build the
-``runtime_env["pixi"]`` field with :func:`pixi`.
+The Ray runtime_env agent reads that variable at startup. The ``runtime_env["pixi"]``
+field is a plain dict (no local ray_pixi needed on the driver):
+
+* inline mode -- ``{"channels": [...], "dependencies": {...}}``
+* project mode -- ``{"manifest": "pixi.toml", "include": ["pyproject.toml", "pkg/**"]}``
+  together with ``runtime_env["working_dir"]``.
+
+:func:`pixi` is an optional convenience for assembling that dict.
 """
 
 from __future__ import annotations

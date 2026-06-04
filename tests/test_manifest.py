@@ -1,8 +1,6 @@
 import os
 import tomllib
 
-import pytest
-
 from ray_pixi import manifest, spec
 
 
@@ -107,18 +105,6 @@ def test_synthesize_defaults_platform_when_unset():
     assert manifest.current_pixi_platform()  # non-empty, e.g. "linux-64"
 
 
-def test_materialize_inlined_content_writes_files(tmp_path):
-    normalized = spec.normalize(
-        {"manifest_content": "[project]\nname='x'\n", "lock_content": "version: 6\n"}
-    )
-    path = manifest.materialize(normalized, str(tmp_path))
-    assert path == os.path.join(str(tmp_path), "pixi.toml")
-    with open(path) as f:
-        assert f.read() == "[project]\nname='x'\n"
-    with open(os.path.join(str(tmp_path), "pixi.lock")) as f:
-        assert f.read() == "version: 6\n"
-
-
 def test_materialize_inline_spec_synthesizes(tmp_path):
     normalized = spec.normalize(
         {"channels": ["conda-forge"], "dependencies": {"python": "*"}}
@@ -127,25 +113,3 @@ def test_materialize_inline_spec_synthesizes(tmp_path):
     assert os.path.exists(path)
     with open(path) as f:
         assert "conda-forge" in f.read()
-
-
-def test_materialize_path_mode_copies_from_agent_fs(tmp_path):
-    src = tmp_path / "src"
-    src.mkdir()
-    (src / "pixi.toml").write_text("[project]\nname='y'\n")
-    (src / "pixi.lock").write_text("version: 6\n")
-    normalized = spec.normalize({"manifest": str(src / "pixi.toml")})
-
-    target = tmp_path / "target"
-    target.mkdir()
-    path = manifest.materialize(normalized, str(target))
-    with open(path) as f:
-        assert f.read() == "[project]\nname='y'\n"
-    with open(os.path.join(str(target), "pixi.lock")) as f:
-        assert f.read() == "version: 6\n"
-
-
-def test_materialize_path_mode_missing_raises(tmp_path):
-    normalized = spec.normalize({"manifest": str(tmp_path / "nope.toml")})
-    with pytest.raises(ValueError, match="could not locate"):
-        manifest.materialize(normalized, str(tmp_path))

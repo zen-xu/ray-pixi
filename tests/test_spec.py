@@ -5,12 +5,11 @@ from ray_pixi import spec
 
 def test_str_field_becomes_manifest_path():
     out = spec.normalize("pixi.toml")
-    assert out.source == "manifest"
-    assert out.manifest_path == "pixi.toml"
+    assert out.source == "project"
+    assert out.manifest == "pixi.toml"
+    assert out.include == []
     assert out.environment == "default"
     assert out.locked is False
-    assert out.pixi_version is None
-    assert out.pixi_install_options == []
 
 
 def test_inline_spec_source():
@@ -20,17 +19,22 @@ def test_inline_spec_source():
     assert out.source == "inline"
     assert out.channels == ["conda-forge"]
     assert out.dependencies == {"python": "3.13.*"}
-    assert out.pypi_dependencies == {}
-    assert out.platforms == []
 
 
-def test_manifest_content_inlined():
+def test_project_with_include():
     out = spec.normalize(
-        {"manifest_content": "[project]\n", "manifest_format": "pixi.toml"}
+        {"manifest": "pixi.toml", "include": ["pyproject.toml", "pkg/**/*.py"]}
     )
-    assert out.source == "manifest"
-    assert out.manifest_content == "[project]\n"
-    assert out.manifest_format == "pixi.toml"
+    assert out.source == "project"
+    assert out.manifest == "pixi.toml"
+    assert out.include == ["pyproject.toml", "pkg/**/*.py"]
+
+
+def test_empty_dict_is_project_auto_discover():
+    out = spec.normalize({})
+    assert out.source == "project"
+    assert out.manifest is None
+    assert out.include == []
 
 
 def test_common_keys_passthrough():
@@ -49,14 +53,14 @@ def test_common_keys_passthrough():
     assert out.pixi_install_options == ["--no-progress"]
 
 
-def test_validate_rejects_both_sources():
+def test_validate_rejects_inline_with_project():
     with pytest.raises(ValueError, match="cannot specify both"):
         spec.validate({"manifest": "p.toml", "channels": ["conda-forge"]})
 
 
-def test_validate_rejects_neither_source():
-    with pytest.raises(ValueError, match="must specify"):
-        spec.validate({"environment": "default"})
+def test_validate_rejects_inline_with_include():
+    with pytest.raises(ValueError, match="cannot specify both"):
+        spec.validate({"include": ["pkg/**"], "dependencies": {"python": "*"}})
 
 
 def test_validate_rejects_wrong_type():
@@ -65,19 +69,13 @@ def test_validate_rejects_wrong_type():
 
 
 def test_compute_uri_prefix_and_determinism():
-    a = spec.compute_uri({"manifest_content": "x", "manifest_format": "pixi.toml"})
-    b = spec.compute_uri({"manifest_content": "x", "manifest_format": "pixi.toml"})
+    a = spec.compute_uri({"channels": ["conda-forge"]})
+    b = spec.compute_uri({"channels": ["conda-forge"]})
     assert a.startswith("pixi://")
     assert a == b
 
 
 def test_compute_uri_changes_with_content():
-    a = spec.compute_uri({"manifest_content": "x"})
-    b = spec.compute_uri({"manifest_content": "y"})
-    assert a != b
-
-
-def test_compute_uri_changes_with_environment():
-    a = spec.compute_uri({"manifest": "p.toml", "environment": "default"})
-    b = spec.compute_uri({"manifest": "p.toml", "environment": "gpu"})
+    a = spec.compute_uri({"dependencies": {"numpy": "1"}})
+    b = spec.compute_uri({"dependencies": {"numpy": "2"}})
     assert a != b
