@@ -118,7 +118,7 @@ def _project_wd(tmp_path, monkeypatch):
 
 def _env_creating_proc(runs):
     class FakeProc:
-        def __init__(self, target, manifest_path, pixi_spec, pixi_exe, logger):
+        def __init__(self, target, manifest_path, pixi_spec, pixi_exe, logger, **kw):
             self._target = target
 
         async def run(self):
@@ -225,6 +225,90 @@ def test_delete_uri_keeps_store_until_last_reference(tmp_path, monkeypatch):
     assert not os.path.exists(store_dir)
 
 
+def test_install_log_lands_in_session_log_dir(tmp_path, monkeypatch):
+    # The dashboard's Logs tab only serves the session logs dir
+    # (/tmp/ray/session_*/logs); the agent receives it as --log-dir. Logs go
+    # into a pixi/ subfolder: browsable in the dashboard (dirs are listed and
+    # navigable), and out of reach of the top-level globs the log monitor
+    # streams to drivers (worker-*, runtime_env*.log, ...).
+    import asyncio
+
+    import ray_pixi.manifest as manifest_mod
+    import ray_pixi.plugin as plugin_mod
+
+    log_dir = tmp_path / "logs"
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "runtime_env_agent",
+            "--runtime-env-dir",
+            str(tmp_path / "res"),
+            "--log-dir",
+            str(log_dir),
+        ],
+    )
+    plugin = PixiPlugin()
+    field = {"channels": ["conda-forge"]}
+    uri = plugin.get_uris({"pixi": field})[0]
+
+    seen = {}
+    monkeypatch.setattr(plugin, "_resolve_pixi", lambda s, t: "/fake/pixi")
+    monkeypatch.setattr(
+        manifest_mod, "materialize", lambda s, t: os.path.join(t, "pixi.toml")
+    )
+
+    class FakeProc:
+        def __init__(self, *a, **k):
+            seen["log_path"] = k.get("log_path")
+
+        async def run(self):
+            pass
+
+    monkeypatch.setattr(plugin_mod, "PixiProcessor", FakeProc)
+    asyncio.run(plugin.create(uri, {"pixi": field}, None, logging.getLogger("t")))
+
+    import re
+
+    # A fresh timestamped file per install attempt: retries do not append to
+    # (or overwrite) a previous attempt's log.
+    assert os.path.dirname(seen["log_path"]) == os.path.join(str(log_dir), "pixi")
+    assert re.fullmatch(
+        rf"install-\d{{14}}-{plugin._hash_of(uri)}\.log",
+        os.path.basename(seen["log_path"]),
+    )
+
+
+def test_delete_uri_removes_install_logs(tmp_path, monkeypatch):
+    import asyncio
+
+    import ray_pixi.plugin as plugin_mod
+
+    _project_wd(tmp_path, monkeypatch)
+    plugin = PixiPlugin(str(tmp_path / "res"))
+    field = {"manifest": "pixi.toml"}
+    runtime_env = {"pixi": field, "working_dir": "gcs://_ray_pkg_x.zip"}
+    uri = plugin.get_uris(runtime_env)[0]
+
+    monkeypatch.setattr(plugin, "_resolve_pixi", lambda s, t: "/fake/pixi")
+    monkeypatch.setattr(plugin_mod, "PixiProcessor", _env_creating_proc([]))
+    asyncio.run(plugin.create(uri, runtime_env, None, logging.getLogger("t")))
+
+    with open(os.path.join(plugin._target_dir(uri), "STORE")) as f:
+        store_hash = f.read().strip()
+    store_dir = os.path.join(plugin._resource_dir, "store", store_hash)
+    # Two timestamped attempts for the same env: both must be cleaned up.
+    logs = [
+        os.path.join(plugin._log_dir, f"install-2099010100000{i}-{store_hash}.log")
+        for i in (1, 2)
+    ]
+    for log in logs:
+        open(log, "w").close()
+
+    plugin.delete_uri(uri, logging.getLogger("t"))
+    assert not os.path.exists(store_dir)
+    assert not any(os.path.exists(log) for log in logs)
+
+
 def test_create_project_failure_cleans_store(tmp_path, monkeypatch):
     import asyncio
 
@@ -295,7 +379,7 @@ def test_create_inline_materializes_and_runs(tmp_path, monkeypatch):
     )
 
     class FakeProc:
-        def __init__(self, target, manifest_path, pixi_spec, pixi_exe, logger):
+        def __init__(self, target, manifest_path, pixi_spec, pixi_exe, logger, **kw):
             seen["manifest_path"] = manifest_path
             seen["pixi_exe"] = pixi_exe
 

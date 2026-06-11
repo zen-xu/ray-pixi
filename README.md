@@ -120,6 +120,17 @@ How ray-pixi helps:
   still pin `python` to the cluster's exact version (e.g. `python = "==3.13.12"` in
   your manifest), or relax the cluster to `minor`.
 
+## Install logs
+
+Each install attempt writes pixi's output to its own timestamped file in the
+node's session logs dir — `/tmp/ray/session_*/logs/pixi/install-<timestamp>-<hash>.log`
+— so it is browsable in the Ray dashboard's **Logs** tab (and via
+`ray logs "pixi/*"`), while staying out of the top-level patterns Ray streams
+to drivers/clients (`runtime_env_setup-*.log`, `worker-*`). The setup log only
+records a one-line pointer to it, and a failed install raises an error
+carrying the log tail. The logs survive the cleanup of a failed env dir and
+are removed together with their environment.
+
 ## Known interactions
 
 - **Launching the driver with `uv run`:** Ray's built-in uv integration

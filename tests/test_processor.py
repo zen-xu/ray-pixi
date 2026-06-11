@@ -89,6 +89,77 @@ def test_processor_adds_locked_and_options(tmp_path):
     assert "--no-progress" in captured["cmd"]
 
 
+def test_default_runner_streams_output_to_log_file(tmp_path):
+    # pixi's verbose output must go to a dedicated file, NOT to a ray logger:
+    # runtime_env_setup-*.log can be streamed to drivers/clients.
+    log_path = str(tmp_path / "x.install.log")
+    asyncio.run(
+        processor._stream_to_log_runner(
+            ["sh", "-c", "echo out; echo err 1>&2"],
+            cwd=str(tmp_path),
+            log_path=log_path,
+        )
+    )
+    with open(log_path) as f:
+        content = f.read()
+    assert "out" in content
+    assert "err" in content  # stderr is merged into the same file
+
+
+def test_default_runner_failure_raises_with_tail_and_path(tmp_path):
+    log_path = str(tmp_path / "x.install.log")
+    with pytest.raises(RuntimeError, match="boom") as excinfo:
+        asyncio.run(
+            processor._stream_to_log_runner(
+                ["sh", "-c", "echo boom; exit 3"],
+                cwd=str(tmp_path),
+                log_path=log_path,
+            )
+        )
+    assert "exit code 3" in str(excinfo.value)
+    assert log_path in str(excinfo.value)
+
+
+def test_default_runner_disables_color(tmp_path):
+    log_path = str(tmp_path / "x.install.log")
+    asyncio.run(
+        processor._stream_to_log_runner(
+            ["sh", "-c", 'printf "NO_COLOR=%s" "$NO_COLOR"'],
+            cwd=str(tmp_path),
+            log_path=log_path,
+        )
+    )
+    with open(log_path) as f:
+        assert "NO_COLOR=1" in f.read()
+
+
+def test_processor_run_writes_sibling_install_log(tmp_path):
+    # Default log location is a sibling of the env dir, so a failed install's
+    # cleanup (rmtree of the env dir) keeps the log for inspection.
+    target = str(tmp_path / "envdir")
+    os.makedirs(target)
+    _populate_env(
+        target,
+        python_minor=manifest.current_python_minor(),
+        ray_version=manifest.current_ray_version(),
+    )
+    manifest_path = os.path.join(target, "pixi.toml")
+    proc = processor.PixiProcessor(
+        target,
+        manifest_path,
+        spec.normalize(_default_field()),
+        "/bin/echo",  # stands in for pixi: prints the args it gets
+        logging.getLogger("test"),
+    )
+    asyncio.run(proc.run())
+
+    log_path = f"{target}.install.log"
+    assert os.path.exists(log_path)
+    with open(log_path) as f:
+        content = f.read()
+    assert "--manifest-path" in content
+
+
 def test_processor_rejects_missing_python(tmp_path):
     target = str(tmp_path)
 

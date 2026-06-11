@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import functools
 import logging
+import os
 from collections.abc import Awaitable, Callable
 
 from ray_pixi import manifest
@@ -10,12 +13,42 @@ from ray_pixi.spec import PixiSpec
 
 Runner = Callable[..., Awaitable[None]]
 
+_LOG_TAIL_BYTES = 4096
 
-async def _default_runner(cmd: list[str], *, cwd: str) -> None:
-    # Imported lazily: only the agent side (where ray is installed) needs it.
-    from ray._private.runtime_env.utils import check_output_cmd
 
-    await check_output_cmd(cmd, logger=logging.getLogger("ray_pixi"), cwd=cwd)
+def _tail(log_path: str, max_bytes: int = _LOG_TAIL_BYTES) -> str:
+    try:
+        with open(log_path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - max_bytes))
+            return f.read().decode("utf-8", "replace")
+    except OSError:
+        return "<log unavailable>"
+
+
+async def _stream_to_log_runner(cmd: list[str], *, cwd: str, log_path: str) -> None:
+    """Run cmd with stdout/stderr appended to a dedicated log file.
+
+    Deliberately NOT a ray logger: runtime_env setup logs
+    (runtime_env_setup-*.log) can be streamed to drivers/clients, and pixi's
+    verbose install output does not belong there. Redirecting the file
+    descriptor also keeps the agent's event loop out of the data path and the
+    file live-tailable on the node.
+    """
+    env = {**os.environ, "NO_COLOR": "1"}
+    with open(log_path, "ab") as f:
+        f.write(f"$ {' '.join(cmd)}\n".encode())
+        f.flush()
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, cwd=cwd, env=env, stdout=f, stderr=asyncio.subprocess.STDOUT
+        )
+        returncode = await proc.wait()
+    if returncode != 0:
+        raise RuntimeError(
+            f"`{' '.join(cmd)}` failed with exit code {returncode}. "
+            f"Last output:\n{_tail(log_path)}\nFull log: {log_path}"
+        )
 
 
 class PixiProcessor:
@@ -30,13 +63,18 @@ class PixiProcessor:
         logger: logging.Logger,
         *,
         runner: Runner | None = None,
+        log_path: str | None = None,
     ) -> None:
         self._target_dir = target_dir
         self._manifest_path = manifest_path
         self._spec = pixi_spec
         self._pixi_exe = pixi_exe
         self._logger = logger
-        self._runner = runner or _default_runner
+        # A sibling of the env dir: survives the env dir's removal on failure.
+        self._log_path = log_path or f"{target_dir}.install.log"
+        self._runner = runner or functools.partial(
+            _stream_to_log_runner, log_path=self._log_path
+        )
 
     async def run(self) -> None:
         cmd = [
@@ -51,7 +89,11 @@ class PixiProcessor:
             cmd.append("--locked")
         cmd += self._spec.pixi_install_options
 
-        self._logger.info("Installing pixi environment into %s", self._target_dir)
+        self._logger.info(
+            "Installing pixi environment into %s (pixi output -> %s)",
+            self._target_dir,
+            self._log_path,
+        )
         await self._runner(cmd, cwd=self._target_dir)
         self._verify_versions()
 

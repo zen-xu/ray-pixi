@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import glob
 import logging
 import os
 import shutil
 import sys
 import tempfile
+from datetime import datetime
 
 from ray._common.utils import try_to_create_directory
 from ray._private.runtime_env.plugin import RuntimeEnvPlugin
@@ -25,30 +28,46 @@ _POINTER_FILE = "STORE"
 _OK_MARKER = ".ray-pixi-ok"
 
 
-def _agent_resources_dir() -> str:
-    """Resolve the runtime_env resource dir the agent was started with.
+def _argv_flag(flag: str) -> str | None:
+    """Read a CLI flag value from this process's argv, or None.
 
-    Third-party plugins loaded via RAY_RUNTIME_ENV_PLUGINS are constructed with
-    no arguments, so the dir is not injected; the agent receives it as the
-    ``--runtime-env-dir`` CLI argument, which we read from ``sys.argv``.
+    Third-party plugins loaded via RAY_RUNTIME_ENV_PLUGINS are constructed
+    with no arguments, so agent settings are not injected; the agent receives
+    them as CLI arguments (e.g. ``--runtime-env-dir``, ``--log-dir``).
     """
     argv = sys.argv
-    flag = "--runtime-env-dir"
     if flag in argv:
-        return argv[argv.index(flag) + 1]
+        index = argv.index(flag)
+        if index + 1 < len(argv):
+            return argv[index + 1]
     for arg in argv:
         if arg.startswith(f"{flag}="):
             return arg.split("=", 1)[1]
-    return os.path.join(tempfile.gettempdir(), "ray_pixi")
+    return None
+
+
+def _agent_resources_dir() -> str:
+    """Resolve the runtime_env resource dir the agent was started with."""
+    return _argv_flag("--runtime-env-dir") or os.path.join(
+        tempfile.gettempdir(), "ray_pixi"
+    )
 
 
 class PixiPlugin(RuntimeEnvPlugin):
     name = "pixi"
 
-    def __init__(self, resources_dir: str | None = None):
+    def __init__(self, resources_dir: str | None = None, log_dir: str | None = None):
         if resources_dir is None:
             resources_dir = _agent_resources_dir()
         self._resource_dir = os.path.join(resources_dir, "pixi")
+        if log_dir is None:
+            # The agent's --log-dir is the session logs dir
+            # (/tmp/ray/session_*/logs), the only dir the dashboard's Logs tab
+            # serves; install logs go there to be viewable from the web UI.
+            log_dir = _argv_flag("--log-dir") or os.path.join(
+                self._resource_dir, "logs"
+            )
+        self._log_dir = os.path.join(log_dir, "pixi")
         self._creating_task: dict[str, asyncio.Task] = {}
         # One lock per URI prevents concurrent installs of the same environment.
         self._create_locks: dict[str, asyncio.Lock] = {}
@@ -59,6 +78,7 @@ class PixiPlugin(RuntimeEnvPlugin):
         # Maps a created hash to the size in bytes of its installed directory.
         self._created_hash_bytes: dict[str, int] = {}
         try_to_create_directory(self._resource_dir)
+        try_to_create_directory(self._log_dir)
 
     @staticmethod
     def validate(runtime_env_dict: dict) -> None:
@@ -94,6 +114,24 @@ class PixiPlugin(RuntimeEnvPlugin):
         """Dir holding the manifest and .pixi env (the store entry if pointed)."""
         store_hash = self._pointer_of(target_dir)
         return self._store_dir(store_hash) if store_hash else target_dir
+
+    def _new_install_log_path(self, env_hash: str) -> str:
+        """Fresh install log in the pixi/ subfolder of the session logs dir.
+
+        Browsable from the dashboard's Logs tab (dirs are listed and files in
+        them servable), while staying out of the top-level globs Ray's log
+        monitor streams to drivers/clients (worker-*, runtime_env*.log, ...).
+        Timestamped per install attempt so a retry never appends to a previous
+        attempt's log.
+        """
+        stamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        return os.path.join(self._log_dir, f"install-{stamp}-{env_hash}.log")
+
+    def _remove_install_logs_for(self, env_hash: str) -> None:
+        """Remove the logs of all install attempts of the given env."""
+        for path in glob.glob(os.path.join(self._log_dir, f"install-*-{env_hash}.log")):
+            with contextlib.suppress(OSError):
+                os.remove(path)
 
     def get_uris(self, runtime_env) -> list[str]:
         field = runtime_env.get("pixi")
@@ -171,7 +209,12 @@ class PixiPlugin(RuntimeEnvPlugin):
             pixi_exe = await self._resolve_pixi_async(pixi_spec, env_root)
             manifest_path = await loop.run_in_executor(None, materialize_manifest)
             await PixiProcessor(
-                env_root, manifest_path, pixi_spec, pixi_exe, logger
+                env_root,
+                manifest_path,
+                pixi_spec,
+                pixi_exe,
+                logger,
+                log_path=self._new_install_log_path(os.path.basename(env_root)),
             ).run()
         except Exception:
             self._cleanup_failed(env_root, logger)
@@ -320,6 +363,7 @@ class PixiPlugin(RuntimeEnvPlugin):
         except OSError as e:
             logger.warning("Error deleting pixi store %s: %s", store_dir, e)
             return 0
+        self._remove_install_logs_for(store_hash)
         self._store_locks.pop(store_hash, None)
         return size
 
@@ -340,6 +384,7 @@ class PixiPlugin(RuntimeEnvPlugin):
         except OSError as e:
             logger.warning("Error deleting pixi env %s: %s", target_dir, e)
             return 0
+        self._remove_install_logs_for(hash_val)
         if store_hash:
             size += self._gc_store(store_hash, logger)
         return size
