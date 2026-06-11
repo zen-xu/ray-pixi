@@ -1,7 +1,7 @@
 [project]
 name = "ray-pixi"
 dynamic = ["version"]
-description = "Add your description here"
+description = "A pixi runtime_env plugin for Ray"
 readme = "README.md"
 authors = [
     { name = "ZhengYu Xu", email = "zen-xu@outlook.com" },

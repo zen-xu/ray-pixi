@@ -35,7 +35,13 @@ import ray
 
 from ray_pixi import pixi
 
-ray.init(runtime_env={"pixi": pixi("pixi.toml", environment="default", locked=True)})
+ray.init(
+    runtime_env={
+        # project mode: the manifest (and its pixi.lock) travel via working_dir
+        "pixi": pixi("pixi.toml", environment="default", locked=True),
+        "working_dir": ".",
+    }
+)
 
 
 @ray.remote
@@ -67,16 +73,21 @@ ray.init(
 
 | key | description |
 | --- | --- |
-| `manifest` | path to a `pixi.toml` / `pyproject.toml` (mutually exclusive with the inline keys) |
+| `manifest` | working_dir-relative path to a `pixi.toml` / `pyproject.toml` (mutually exclusive with the inline keys) |
+| `include` | extra globs (relative to working_dir) selecting env-defining files, e.g. local package sources for an editable install |
 | `channels` / `dependencies` / `pypi_dependencies` / `platforms` | inline spec |
 | `environment` | environment to select, defaults to `default` |
 | `locked` | reproduce strictly from `pixi.lock`, defaults to `False` |
 | `pixi_version` | if set, bootstrap this pixi version on the node |
 | `pixi_install_options` | extra flags passed through to `pixi install` |
 
-Prefer building the field with `ray_pixi.pixi()`: given a manifest path it reads
-the file (and a sibling `pixi.lock`) on the driver and inlines the content, so the
-configuration is self-contained across nodes.
+In project mode (`manifest`/`include`) the files are **not** read on the driver:
+they travel to the nodes via `runtime_env["working_dir"]`, which is therefore
+required, and a `pixi.lock` must sit next to the manifest so every node installs
+the exact same environment. Installed environments are cached by the content
+hash of the env-defining subset (manifest + `pixi.lock` + `include` matches), so
+editing other files in the working_dir — e.g. the driver script — re-uploads the
+working_dir but does **not** rebuild the pixi environment.
 
 > **Requirements:** every node needs a `pixi` executable (on `PATH`, or bootstrapped
 > via `pixi_version`), and the pixi environment must provide a `python` and `ray`

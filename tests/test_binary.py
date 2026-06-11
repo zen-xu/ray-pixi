@@ -29,6 +29,70 @@ def test_resolve_missing_raises(tmp_path, monkeypatch):
         binary.resolve_pixi(str(tmp_path / "target"), pixi_version=None)
 
 
+def test_bootstrap_skips_download_when_already_installed(tmp_path, monkeypatch):
+    # A previous create() left the installer layout (.pixi-bin/bin/pixi); the
+    # next bootstrap must reuse it instead of re-downloading every time.
+    target = tmp_path / "target"
+    installed = target / ".pixi-bin" / "bin"
+    exe = _make_fake_pixi(str(installed))
+
+    def boom(*a, **k):
+        raise AssertionError("must not download when already bootstrapped")
+
+    monkeypatch.setattr("urllib.request.urlopen", boom)
+    monkeypatch.setattr("urllib.request.urlretrieve", boom)
+    assert binary._bootstrap_pixi(str(target), "0.40.0") == exe
+
+
+def test_bootstrap_raises_when_installer_leaves_no_exe(tmp_path, monkeypatch):
+    target = tmp_path / "target"
+    monkeypatch.setattr(binary, "_download", lambda url, dest: open(dest, "w").close())
+    monkeypatch.setattr(binary.subprocess, "check_call", lambda *a, **k: None)
+    with pytest.raises(RuntimeError, match="no executable"):
+        binary._bootstrap_pixi(str(target), "0.40.0")
+
+
+def test_existing_bootstrap_exe_windows_naming(tmp_path, monkeypatch):
+    monkeypatch.setattr(binary.sys, "platform", "win32")
+    bin_dir = tmp_path / ".pixi-bin"
+    (bin_dir / "bin").mkdir(parents=True)
+    exe = bin_dir / "bin" / "pixi.exe"
+    exe.write_text("")
+    assert binary._existing_bootstrap_exe(str(bin_dir)) == str(exe)
+
+
+def test_download_passes_timeout(tmp_path, monkeypatch):
+    seen = {}
+
+    class FakeResp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self, *a):
+            return b""
+
+    def fake_urlopen(url, timeout=None):
+        seen["timeout"] = timeout
+        return FakeResp()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    binary._download("https://example.com/x", str(tmp_path / "x"))
+    assert seen["timeout"] is not None and seen["timeout"] > 0
+
+
+def test_find_bootstrapped_pixi_never_downloads(tmp_path, monkeypatch):
+    def boom(*a, **k):
+        raise AssertionError("find_bootstrapped_pixi must not download")
+
+    monkeypatch.setattr("urllib.request.urlopen", boom)
+    assert binary.find_bootstrapped_pixi(str(tmp_path)) is None
+    exe = _make_fake_pixi(str(tmp_path / ".pixi-bin" / "bin"))
+    assert binary.find_bootstrapped_pixi(str(tmp_path)) == exe
+
+
 def test_resolve_with_version_bootstraps(tmp_path, monkeypatch):
     target = tmp_path / "target"
     target.mkdir()

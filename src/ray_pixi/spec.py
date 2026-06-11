@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from typing import Any, Literal, overload
 
 from pydantic import BaseModel, ConfigDict, model_validator
@@ -13,7 +14,7 @@ INLINE_KEYS = ("channels", "dependencies", "pypi_dependencies", "platforms")
 class PixiSpec(BaseModel):
     """Normalized pixi runtime_env configuration (the contract used throughout)."""
 
-    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+    model_config = ConfigDict(extra="forbid")
 
     # Project mode: a manifest + include globs resolved against the working_dir.
     manifest: str | None = None
@@ -31,27 +32,24 @@ class PixiSpec(BaseModel):
     pixi_install_options: list[str] = []
 
     @property
-    def source(self) -> Literal["inline", "project"]:
-        """Inline dependency keys -> "inline"; otherwise a working_dir project."""
-        has_inline = bool(
+    def _has_inline(self) -> bool:
+        return bool(
             self.channels
             or self.dependencies
             or self.pypi_dependencies
             or self.platforms
         )
-        return "inline" if has_inline else "project"
+
+    @property
+    def source(self) -> Literal["inline", "project"]:
+        """Inline dependency keys -> "inline"; otherwise a working_dir project."""
+        return "inline" if self._has_inline else "project"
 
     @model_validator(mode="after")
     def _reject_inline_with_project(self) -> PixiSpec:
         """Inline dependency keys and project keys (manifest/include) are exclusive."""
-        has_inline = bool(
-            self.channels
-            or self.dependencies
-            or self.pypi_dependencies
-            or self.platforms
-        )
         has_project = bool(self.manifest or self.include)
-        if has_inline and has_project:
+        if self._has_inline and has_project:
             raise ValueError(
                 "runtime_env['pixi'] cannot specify both inline spec keys "
                 f"({', '.join(INLINE_KEYS)}) and project keys (manifest/include)."
@@ -82,7 +80,9 @@ def compute_uri(field: str | dict) -> str:
     the same inline spec. For project mode, use ``project.compute_project_uri``
     instead, which hashes the working_dir file subset.
     """
-    canonical = normalize(field).model_dump_json()
+    # json.dumps with sort_keys so dict key order does not change the URI
+    # (model_dump_json preserves insertion order).
+    canonical = json.dumps(normalize(field).model_dump(), sort_keys=True)
     digest = hashlib.sha1(canonical.encode("utf-8")).hexdigest()
     return f"pixi://{digest}"
 

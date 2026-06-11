@@ -22,14 +22,29 @@ def current_python_minor() -> str:
     return f"{sys.version_info.major}.{sys.version_info.minor}"
 
 
+def _env_dir(target_dir: str, environment: str) -> str:
+    return os.path.join(target_dir, ".pixi", "envs", environment)
+
+
 def installed_python_minor(target_dir: str, environment: str) -> str | None:
     """Return the ``major.minor`` of the python installed in the pixi env.
 
-    Reads it from the ``lib/python3.X`` directory of the installed environment.
-    Returns None when it cannot be determined (e.g. a non-POSIX layout).
+    Primary probe: the ``conda-meta/python-<version>-<build>.json`` record,
+    which exists on every platform (pixi installs python from conda). Falls
+    back to the POSIX ``lib/python3.X`` directory. Returns None if neither is
+    found.
     """
-    pattern = os.path.join(target_dir, ".pixi", "envs", environment, "lib", "python3.*")
-    for path in glob.glob(pattern):
+    meta_pattern = os.path.join(
+        _env_dir(target_dir, environment), "conda-meta", "python-[0-9]*.json"
+    )
+    for path in glob.glob(meta_pattern):
+        version = os.path.basename(path).removeprefix("python-").split("-")[0]
+        parts = version.split(".")
+        if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+            return f"{parts[0]}.{parts[1]}"
+
+    lib_pattern = os.path.join(_env_dir(target_dir, environment), "lib", "python3.*")
+    for path in glob.glob(lib_pattern):
         name = os.path.basename(path).removeprefix("python")
         if name[:1].isdigit():
             return name
@@ -46,23 +61,20 @@ def current_ray_version() -> str:
 def installed_ray_version(target_dir: str, environment: str) -> str | None:
     """Return the ray version installed in the pixi env, or None if not found.
 
-    Reads it from the ``ray-<version>.dist-info`` directory under site-packages.
+    Reads it from the ``ray-<version>.dist-info`` directory under site-packages,
+    probing both the POSIX (``lib/python3.X``) and Windows (``Lib``) layouts.
     """
-    pattern = os.path.join(
-        target_dir,
-        ".pixi",
-        "envs",
-        environment,
-        "lib",
-        "python3.*",
-        "site-packages",
-        "ray-*.dist-info",
+    env_dir = _env_dir(target_dir, environment)
+    patterns = (
+        os.path.join(env_dir, "lib", "python3.*", "site-packages", "ray-*.dist-info"),
+        os.path.join(env_dir, "Lib", "site-packages", "ray-*.dist-info"),
     )
-    for path in glob.glob(pattern):
-        name = os.path.basename(path)
-        version = name[len("ray-") : -len(".dist-info")]
-        if version[:1].isdigit():
-            return version
+    for pattern in patterns:
+        for path in glob.glob(pattern):
+            name = os.path.basename(path)
+            version = name[len("ray-") : -len(".dist-info")]
+            if version[:1].isdigit():
+                return version
     return None
 
 
@@ -92,9 +104,15 @@ def synthesize_pixi_toml(pixi_spec: PixiSpec) -> str:
     dependencies = dict(pixi_spec.dependencies)
     dependencies.setdefault("python", f"=={current_python_version()}")
     pypi_dependencies = dict(pixi_spec.pypi_dependencies)
-    pypi_dependencies.setdefault(
-        "ray", {"version": f"=={current_ray_version()}", "extras": ["default"]}
+    # conda-forge ships ray as ray-core/ray-default/...; injecting the pypi ray
+    # on top of a conda ray would install it twice.
+    has_conda_ray = any(
+        name == "ray" or name.startswith("ray-") for name in dependencies
     )
+    if not has_conda_ray:
+        pypi_dependencies.setdefault(
+            "ray", {"version": f"=={current_ray_version()}", "extras": ["default"]}
+        )
     return tomli_w.dumps(
         {
             "workspace": {

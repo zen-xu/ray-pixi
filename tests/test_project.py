@@ -48,20 +48,43 @@ def test_collect_files_includes_manifest_lock_and_globs(tmp_path):
     wd = _wd(tmp_path)
     s = spec.normalize({"manifest": "pixi.toml", "include": ["pkg/**/*.py"]})
     files = project.collect_files(s, wd)
-    assert files["pixi.toml"] == "[workspace]\n"
-    assert files["pixi.lock"] == "version: 6\n"
-    assert files[os.path.join("pkg", "__init__.py")] == "x = 1\n"
+    assert files["pixi.toml"] == b"[workspace]\n"
+    assert files["pixi.lock"] == b"version: 6\n"
+    assert files[os.path.join("pkg", "__init__.py")] == b"x = 1\n"
     # driver.py and pyproject.toml are NOT in include -> excluded
     assert "driver.py" not in files
     assert "pyproject.toml" not in files
 
 
-def test_collect_files_rejects_non_text(tmp_path):
+def test_collect_files_allows_binary(tmp_path):
     wd = _wd(tmp_path)
-    (tmp_path / "blob.bin").write_bytes(b"\xff\xfe\x00\x01")
+    payload = b"\xff\xfe\x00\x01"
+    (tmp_path / "blob.bin").write_bytes(payload)
     s = spec.normalize({"manifest": "pixi.toml", "include": ["blob.bin"]})
-    with pytest.raises(ValueError, match="non-text"):
-        project.collect_files(s, wd)
+    assert project.collect_files(s, wd)["blob.bin"] == payload
+
+
+def test_materialize_project_preserves_bytes_exactly(tmp_path):
+    # CRLF must survive the copy; text-mode IO would rewrite it to LF and the
+    # materialized project would no longer match the working_dir content.
+    wd = _wd(tmp_path)
+    (tmp_path / "win.cfg").write_bytes(b"a = 1\r\nb = 2\r\n")
+    target = tmp_path / "target"
+    target.mkdir()
+    s = spec.normalize({"manifest": "pixi.toml", "include": ["win.cfg"]})
+    project.materialize_project(s, wd, str(target))
+    assert (target / "win.cfg").read_bytes() == b"a = 1\r\nb = 2\r\n"
+
+
+def test_collect_files_rejects_symlink_escape(tmp_path):
+    wd = tmp_path / "wd"
+    wd.mkdir()
+    (wd / "pixi.toml").write_text("[workspace]\n")
+    (tmp_path / "outside.py").write_text("evil\n")
+    os.symlink(tmp_path / "outside.py", wd / "sneaky.py")
+    s = spec.normalize({"manifest": "pixi.toml", "include": ["sneaky.py"]})
+    with pytest.raises(ValueError, match="outside"):
+        project.collect_files(s, str(wd))
 
 
 def test_compute_project_uri_stable_and_subset_sensitive(tmp_path):

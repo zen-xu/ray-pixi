@@ -92,6 +92,39 @@ def test_installed_python_minor_none_when_absent(tmp_path):
     assert manifest.installed_python_minor(str(tmp_path), "default") is None
 
 
+def test_installed_python_minor_reads_conda_meta(tmp_path):
+    # Windows envs have no lib/python3.x dir; conda-meta works on all platforms.
+    meta = tmp_path / ".pixi" / "envs" / "default" / "conda-meta"
+    meta.mkdir(parents=True)
+    (meta / "python-3.13.2-h4567_0_cpython.json").write_text("{}")
+    (meta / "python-dateutil-2.9.0-pyhd8ed1ab_0.json").write_text("{}")
+    assert manifest.installed_python_minor(str(tmp_path), "default") == "3.13"
+
+
+def test_installed_ray_version_reads_windows_layout(tmp_path):
+    dist = (
+        tmp_path
+        / ".pixi"
+        / "envs"
+        / "default"
+        / "Lib"
+        / "site-packages"
+        / "ray-2.55.1.dist-info"
+    )
+    dist.mkdir(parents=True)
+    assert manifest.installed_ray_version(str(tmp_path), "default") == "2.55.1"
+
+
+def test_synthesize_skips_pypi_ray_when_conda_ray_present(tmp_path):
+    import tomllib
+
+    normalized = spec.normalize(
+        {"channels": ["conda-forge"], "dependencies": {"ray-default": "2.55.*"}}
+    )
+    parsed = tomllib.loads(manifest.synthesize_pixi_toml(normalized))
+    assert "ray" not in parsed.get("pypi-dependencies", {})
+
+
 def test_synthesize_defaults_channels_when_empty():
     normalized = spec.normalize({"pypi_dependencies": {"sh": "*"}})
     parsed = tomllib.loads(manifest.synthesize_pixi_toml(normalized))

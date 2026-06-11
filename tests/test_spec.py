@@ -79,3 +79,10 @@ def test_compute_uri_changes_with_content():
     a = spec.compute_uri({"dependencies": {"numpy": "1"}})
     b = spec.compute_uri({"dependencies": {"numpy": "2"}})
     assert a != b
+
+
+def test_compute_uri_insensitive_to_dict_key_order():
+    # The same spec written in a different key order must hit the same cache.
+    a = spec.compute_uri({"dependencies": {"numpy": "1", "pandas": "2"}})
+    b = spec.compute_uri({"dependencies": {"pandas": "2", "numpy": "1"}})
+    assert a == b

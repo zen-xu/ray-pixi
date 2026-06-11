@@ -1,8 +1,15 @@
 """Project mode: collect the env-defining file subset from the working_dir.
 
-The cache hash is computed from this subset only (manifest + include globs +
-pixi.lock), so editing files outside ``include`` (e.g. driver scripts) does not
-invalidate the installed pixi environment.
+Two hashes play different roles:
+
+* ``compute_project_uri_from_working_dir_uri`` -- the plugin URI Ray uses for
+  reference counting. Derived from the working_dir URI because ``get_uris``
+  runs before the working_dir is downloaded, so it changes with ANY file edit.
+* ``compute_project_uri`` -- the content hash of the env-defining subset only
+  (manifest + pixi.lock + include matches), computed in ``create`` where files
+  are available. Installed environments are stored under this hash, so editing
+  files outside ``include`` (e.g. driver scripts) yields a new plugin URI but
+  reuses the installed environment instead of rebuilding it.
 """
 
 from __future__ import annotations
@@ -23,10 +30,10 @@ def resolve_working_dir() -> str | None:
 
 
 def _assert_within(path: str, base: str, label: str) -> None:
-    """Raise ValueError if path escapes base (blocks ``..`` traversal)."""
-    abs_base = os.path.abspath(base)
-    abs_path = os.path.abspath(path)
-    if abs_path != abs_base and not abs_path.startswith(abs_base + os.sep):
+    """Raise ValueError if path escapes base (blocks ``..`` and symlink escapes)."""
+    real_base = os.path.realpath(base)
+    real_path = os.path.realpath(path)
+    if real_path != real_base and not real_path.startswith(real_base + os.sep):
         raise ValueError(
             f"pixi {label} {path!r} resolves outside {base!r}; paths must stay "
             "within the working_dir."
@@ -58,27 +65,25 @@ def main_manifest_path(pixi_spec: PixiSpec, base_dir: str) -> str:
     )
 
 
-def _read_text(path: str) -> str:
-    try:
-        with open(path, encoding="utf-8") as f:
-            return f.read()
-    except UnicodeDecodeError as exc:
-        raise ValueError(
-            f"pixi include matched a non-text file: {path}. Narrow the glob so it "
-            "only selects text files (manifests, sources)."
-        ) from exc
+def _read_bytes(path: str) -> bytes:
+    with open(path, "rb") as f:
+        return f.read()
 
 
-def collect_files(pixi_spec: PixiSpec, working_dir: str) -> dict[str, str]:
-    """Collect {relpath: content} for the env-defining subset under working_dir."""
-    files: dict[str, str] = {}
+def collect_files(pixi_spec: PixiSpec, working_dir: str) -> dict[str, bytes]:
+    """Collect {relpath: content} for the env-defining subset under working_dir.
+
+    Contents are raw bytes so the hash and the materialized copy match the
+    working_dir exactly (no newline translation, binary files allowed).
+    """
+    files: dict[str, bytes] = {}
 
     manifest_path = main_manifest_path(pixi_spec, working_dir)
-    files[os.path.relpath(manifest_path, working_dir)] = _read_text(manifest_path)
+    files[os.path.relpath(manifest_path, working_dir)] = _read_bytes(manifest_path)
 
     lock_path = os.path.join(os.path.dirname(manifest_path), "pixi.lock")
     if os.path.exists(lock_path):
-        files[os.path.relpath(lock_path, working_dir)] = _read_text(lock_path)
+        files[os.path.relpath(lock_path, working_dir)] = _read_bytes(lock_path)
 
     # include globs may re-match the manifest/lock already collected above;
     # dict-key dedup makes that idempotent.
@@ -86,15 +91,19 @@ def collect_files(pixi_spec: PixiSpec, working_dir: str) -> dict[str, str]:
         for match in glob.glob(os.path.join(working_dir, pattern), recursive=True):
             if os.path.isfile(match):
                 _assert_within(match, working_dir, "include")
-                files[os.path.relpath(match, working_dir)] = _read_text(match)
+                files[os.path.relpath(match, working_dir)] = _read_bytes(match)
 
     return files
 
 
 def compute_project_uri(pixi_spec: PixiSpec, working_dir: str) -> str:
     """Compute ``pixi://<sha1>`` from the include subset + install-affecting keys."""
+    file_hashes = {
+        relpath: hashlib.sha1(content).hexdigest()
+        for relpath, content in collect_files(pixi_spec, working_dir).items()
+    }
     payload = {
-        "files": dict(sorted(collect_files(pixi_spec, working_dir).items())),
+        "files": file_hashes,
         "environment": pixi_spec.environment,
         "locked": pixi_spec.locked,
         "pixi_version": pixi_spec.pixi_version,
@@ -147,6 +156,6 @@ def materialize_project(pixi_spec: PixiSpec, working_dir: str, target_dir: str) 
         dest = os.path.join(target_dir, relpath)
         _assert_within(dest, target_dir, "materialized file")
         os.makedirs(os.path.dirname(dest), exist_ok=True)
-        with open(dest, "w", encoding="utf-8") as f:
+        with open(dest, "wb") as f:
             f.write(content)
     return main_manifest_path(pixi_spec, target_dir)
