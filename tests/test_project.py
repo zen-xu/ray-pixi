@@ -100,6 +100,27 @@ def test_compute_project_uri_stable_and_subset_sensitive(tmp_path):
     assert project.compute_project_uri(s, wd) != a
 
 
+def test_uri_from_working_dir_uri_distinguishes_manifest_and_include():
+    wd_uri = "gcs://_ray_pkg_0123456789abcdef.zip"
+    base = spec.normalize({"manifest": "a/pixi.toml"})
+    other_manifest = spec.normalize({"manifest": "b/pixi.toml"})
+    with_include = spec.normalize({"manifest": "a/pixi.toml", "include": ["pkg/**"]})
+
+    base_uri = project.compute_project_uri_from_working_dir_uri(base, wd_uri)
+    # same working_dir, different manifest -> a different environment
+    assert (
+        project.compute_project_uri_from_working_dir_uri(other_manifest, wd_uri)
+        != base_uri
+    )
+    # same working_dir, different include -> a different environment
+    assert (
+        project.compute_project_uri_from_working_dir_uri(with_include, wd_uri)
+        != base_uri
+    )
+    # identical spec stays stable
+    assert project.compute_project_uri_from_working_dir_uri(base, wd_uri) == base_uri
+
+
 def test_materialize_project_writes_subset_and_returns_manifest(tmp_path):
     wd = _wd(tmp_path)
     target = tmp_path / "target"

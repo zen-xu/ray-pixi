@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import sys
 
 import pytest
 
@@ -118,6 +119,32 @@ def test_default_runner_failure_raises_with_tail_and_path(tmp_path):
         )
     assert "exit code 3" in str(excinfo.value)
     assert log_path in str(excinfo.value)
+
+
+def test_default_runner_kills_subprocess_on_cancel(tmp_path):
+    # delete_uri cancels in-flight creates; the install subprocess must die
+    # with the task, not keep writing into the store dir as an orphan.
+    pid_file = tmp_path / "pid"
+    log_path = str(tmp_path / "x.install.log")
+    cmd = [
+        sys.executable,
+        "-c",
+        "import os, time; open('pid', 'w').write(str(os.getpid())); time.sleep(30)",
+    ]
+
+    async def main():
+        task = asyncio.create_task(
+            processor._stream_to_log_runner(cmd, cwd=str(tmp_path), log_path=log_path)
+        )
+        while not (pid_file.exists() and pid_file.read_text()):
+            await asyncio.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(main())
+    with pytest.raises(ProcessLookupError):
+        os.kill(int(pid_file.read_text()), 0)
 
 
 def test_default_runner_disables_color(tmp_path):

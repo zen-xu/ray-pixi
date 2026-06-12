@@ -126,6 +126,8 @@ def compute_project_uri_from_working_dir_uri(
     """
     payload = {
         "working_dir_uri": working_dir_uri,
+        "manifest": pixi_spec.manifest,
+        "include": pixi_spec.include,
         "environment": pixi_spec.environment,
         "locked": pixi_spec.locked,
         "pixi_version": pixi_spec.pixi_version,

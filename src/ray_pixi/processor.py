@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import functools
 import logging
 import os
@@ -43,7 +44,16 @@ async def _stream_to_log_runner(cmd: list[str], *, cwd: str, log_path: str) -> N
         proc = await asyncio.create_subprocess_exec(
             *cmd, cwd=cwd, env=env, stdout=f, stderr=asyncio.subprocess.STDOUT
         )
-        returncode = await proc.wait()
+        try:
+            returncode = await proc.wait()
+        except asyncio.CancelledError:
+            # delete_uri cancels in-flight creates; the install must die with
+            # the task or it keeps writing into the (re)created dir as an
+            # orphan, racing any subsequent install of the same env.
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+            await proc.wait()
+            raise
     if returncode != 0:
         raise RuntimeError(
             f"`{' '.join(cmd)}` failed with exit code {returncode}. "

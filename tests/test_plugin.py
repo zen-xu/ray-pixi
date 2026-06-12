@@ -225,6 +225,81 @@ def test_delete_uri_keeps_store_until_last_reference(tmp_path, monkeypatch):
     assert not os.path.exists(store_dir)
 
 
+def test_size_accounting_balances_for_shared_store(tmp_path, monkeypatch):
+    # Ray's URICache adds create()'s return per URI and subtracts delete_uri()'s
+    # return on eviction. A reuse create must not re-report the store's size:
+    # the books would gain the store size once per working_dir edit but give it
+    # back only once at final GC, drifting upward until everything evicts.
+    import asyncio
+
+    import ray_pixi.plugin as plugin_mod
+
+    _project_wd(tmp_path, monkeypatch)
+    plugin = PixiPlugin(str(tmp_path / "res"))
+    field = {"manifest": "pixi.toml"}
+    env1 = {"pixi": field, "working_dir": "gcs://_ray_pkg_aaa.zip"}
+    env2 = {"pixi": field, "working_dir": "gcs://_ray_pkg_bbb.zip"}
+    uri1 = plugin.get_uris(env1)[0]
+    uri2 = plugin.get_uris(env2)[0]
+
+    monkeypatch.setattr(plugin, "_resolve_pixi", lambda s, t: "/fake/pixi")
+    monkeypatch.setattr(plugin_mod, "PixiProcessor", _env_creating_proc([]))
+
+    async def main():
+        s1 = await plugin.create(uri1, env1, None, logging.getLogger("t"))
+        s2 = await plugin.create(uri2, env2, None, logging.getLogger("t"))
+        return s1, s2
+
+    size1, size2 = asyncio.run(main())
+    assert size2 < size1  # reuse reports the pointer dir, not the store again
+
+    freed1 = plugin.delete_uri(uri1, logging.getLogger("t"))
+    freed2 = plugin.delete_uri(uri2, logging.getLogger("t"))
+    assert size1 + size2 == freed1 + freed2
+
+
+def test_atomic_write_never_leaves_partial_file(tmp_path, monkeypatch):
+    # An agent kill mid-write must never leave a truncated pointer file: GC is
+    # keyed off pointer contents, so a garbage pointer orphans its store entry.
+    import ray_pixi.plugin as plugin_mod
+
+    path = tmp_path / "ptr"
+    plugin_mod._atomic_write(str(path), "aaa")
+    assert path.read_text() == "aaa"
+
+    def boom(src, dst):
+        raise OSError("killed before rename")
+
+    monkeypatch.setattr(plugin_mod.os, "replace", boom)
+    with pytest.raises(OSError, match="killed before rename"):
+        plugin_mod._atomic_write(str(path), "bbb")
+    monkeypatch.undo()
+    assert path.read_text() == "aaa"  # previous content intact, not truncated
+    assert os.listdir(tmp_path) == ["ptr"]  # no temp litter
+
+
+def test_create_project_writes_pointer_atomically(tmp_path, monkeypatch):
+    import asyncio
+
+    import ray_pixi.plugin as plugin_mod
+
+    _project_wd(tmp_path, monkeypatch)
+    plugin = PixiPlugin(str(tmp_path / "res"))
+    runtime_env = {"pixi": {"manifest": "pixi.toml"}, "working_dir": "gcs://_a.zip"}
+    uri = plugin.get_uris(runtime_env)[0]
+
+    written = []
+    real = plugin_mod._atomic_write
+    monkeypatch.setattr(
+        plugin_mod, "_atomic_write", lambda p, c: (written.append(p), real(p, c))[1]
+    )
+    monkeypatch.setattr(plugin, "_resolve_pixi", lambda s, t: "/fake/pixi")
+    monkeypatch.setattr(plugin_mod, "PixiProcessor", _env_creating_proc([]))
+    asyncio.run(plugin.create(uri, runtime_env, None, logging.getLogger("t")))
+
+    assert any(p.endswith(plugin_mod._POINTER_FILE) for p in written)
+
+
 def test_install_log_lands_in_session_log_dir(tmp_path, monkeypatch):
     # The dashboard's Logs tab only serves the session logs dir
     # (/tmp/ray/session_*/logs); the agent receives it as --log-dir. Logs go

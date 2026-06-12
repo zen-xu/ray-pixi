@@ -28,6 +28,23 @@ _POINTER_FILE = "STORE"
 _OK_MARKER = ".ray-pixi-ok"
 
 
+def _atomic_write(path: str, content: str) -> None:
+    """Write content to path so a crash never leaves a partial file.
+
+    Pointer files are read back by GC to decide whether a store entry is still
+    referenced; a truncated pointer would orphan multi-GB store entries.
+    """
+    fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(content)
+        os.replace(tmp_path, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.remove(tmp_path)
+        raise
+
+
 def _argv_flag(flag: str) -> str | None:
     """Read a CLI flag value from this process's argv, or None.
 
@@ -256,7 +273,8 @@ class PixiPlugin(RuntimeEnvPlugin):
 
         lock = self._store_locks.setdefault(store_hash, asyncio.Lock())
         async with lock:
-            if os.path.exists(os.path.join(store_dir, _OK_MARKER)):
+            reused = os.path.exists(os.path.join(store_dir, _OK_MARKER))
+            if reused:
                 logger.info(
                     "Reusing installed pixi environment %s (content hash hit).",
                     store_dir,
@@ -270,12 +288,18 @@ class PixiPlugin(RuntimeEnvPlugin):
                     ),
                     logger,
                 )
-                with open(os.path.join(store_dir, _OK_MARKER), "w") as f:
-                    f.write(store_uri)
+                _atomic_write(os.path.join(store_dir, _OK_MARKER), store_uri)
             os.makedirs(target_dir, exist_ok=True)
-            with open(os.path.join(target_dir, _POINTER_FILE), "w") as f:
-                f.write(store_hash)
-        return await loop.run_in_executor(None, get_directory_size_bytes, store_dir)
+            _atomic_write(os.path.join(target_dir, _POINTER_FILE), store_hash)
+        # Report the store's size only from the create that installed it, so
+        # the URICache books balance against delete_uri (pointer adds/frees on
+        # reuse, plus the store once at install and once at final GC).
+        size = await loop.run_in_executor(None, get_directory_size_bytes, target_dir)
+        if not reused:
+            size += await loop.run_in_executor(
+                None, get_directory_size_bytes, store_dir
+            )
+        return size
 
     async def create(self, uri, runtime_env, context, logger=default_logger) -> int:
         if not runtime_env.get("pixi"):
@@ -378,7 +402,7 @@ class PixiPlugin(RuntimeEnvPlugin):
         if not os.path.exists(target_dir):
             return 0
         store_hash = self._pointer_of(target_dir)
-        size = 0 if store_hash else get_directory_size_bytes(target_dir)
+        size = get_directory_size_bytes(target_dir)
         try:
             shutil.rmtree(target_dir)
         except OSError as e:
