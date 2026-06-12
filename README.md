@@ -131,6 +131,39 @@ records a one-line pointer to it, and a failed install raises an error
 carrying the log tail. The logs survive the cleanup of a failed env dir and
 are removed together with their environment.
 
+## Caching and garbage collection
+
+Installed environments are **not** deleted when the last job using them exits.
+Ray's runtime_env agent reference-counts each environment per node; when the
+count drops to zero the environment is only marked *unused* and kept on disk,
+so a later submission with the same spec reuses it instantly. Unused
+environments are evicted (deleted) only when the plugin's total cache size on
+a node exceeds its cap.
+
+Two knobs matter in practice — set both in the node environment **before
+`ray start`** (same place as `RAY_RUNTIME_ENV_PLUGINS`):
+
+- **`RAY_RUNTIME_ENV_PIXI_CACHE_SIZE_GB`** (Ray's per-plugin cap, default
+  `10`). Pixi environments easily reach several GB each, so the default fits
+  only a couple of them before they start evicting one another and every
+  submission reinstalls. Size it to the disk you can spare, e.g. `100`. Note
+  that Ray picks the eviction victim arbitrarily among unused environments
+  (not LRU), so a generous cap is the only reliable way to keep hot
+  environments around.
+- **`PIXI_CACHE_DIR`** (pixi's global package cache, defaults to
+  `~/.cache/rattler`). Point it at a persistent volume in containerized
+  deployments. Even when an environment is evicted, reinstalling from a warm
+  package cache (plus `locked: true`, which skips the solve) is mostly a
+  re-link — seconds instead of the minutes a cold first install takes.
+
+In project mode, eviction usually costs nothing anyway: environments are
+stored content-addressed by the env-defining subset, so URIs that differ only
+in unrelated working_dir files share one store entry, and the entry is removed
+only when its last referencing URI is evicted.
+
+If a specific environment must never be evicted, a long-lived detached actor
+declared with that runtime_env keeps its reference count above zero.
+
 ## Known interactions
 
 - **Launching the driver with `uv run`:** Ray's built-in uv integration
@@ -140,3 +173,12 @@ are removed together with their environment.
   `RAY_ENABLE_UV_RUN_RUNTIME_ENV=0`.
 - **`platforms`:** when you declare an inline spec without `platforms`, ray-pixi
   defaults it to the building node's platform (e.g. `linux-64`).
+- **Ray Client (`ray://`) and long installs:** grpcio's Linux wheels enable
+  gRPC's fork handlers by default, and Ray Client's proxy server forks a
+  per-client subprocess right after the runtime_env is created. A long first
+  install keeps the proxy's gRPC threads busy, which can make that fork hit a
+  known gRPC crash (`ev_epoll1_linux.cc ... Check failed: next_worker->state
+  == KICKED`) — the client then fails to connect even though the environment
+  was built (reconnecting usually works, since the env is now cached). Set
+  `GRPC_ENABLE_FORK_SUPPORT=false` in the head node's environment, or prefer
+  the Ray Jobs API over Ray Client.
