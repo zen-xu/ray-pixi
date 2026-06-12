@@ -8,7 +8,7 @@ from ray_pixi.plugin import PixiPlugin
 
 class _Ctx:
     def __init__(self):
-        self.py_executable: str | None = None
+        self.py_executable: str = ""
         self.command_prefix: list = []
         self.env_vars: dict = {}
 
