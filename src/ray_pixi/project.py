@@ -70,11 +70,45 @@ def _read_bytes(path: str) -> bytes:
         return f.read()
 
 
+def _walk_files(directory: str) -> list[str]:
+    """All file paths under directory, recursively, dotfiles included."""
+    paths = []
+    for root, _dirs, names in os.walk(directory):
+        for name in names:
+            path = os.path.join(root, name)
+            if os.path.isfile(path):
+                paths.append(path)
+    return paths
+
+
+def _excluded(pixi_spec: PixiSpec, working_dir: str) -> tuple[set[str], list[str]]:
+    """Expand exclude patterns into (file relpaths, directory relpath prefixes).
+
+    Uses the same glob dialect as include so the two fields always agree on
+    what a pattern means. A matched directory prunes its whole subtree.
+    """
+    excluded_files: set[str] = set()
+    excluded_dir_prefixes: list[str] = []
+    for pattern in pixi_spec.exclude:
+        for match in glob.glob(os.path.join(working_dir, pattern), recursive=True):
+            rel = os.path.relpath(match, working_dir)
+            if os.path.isdir(match):
+                excluded_dir_prefixes.append(rel + os.sep)
+            else:
+                excluded_files.add(rel)
+    return excluded_files, excluded_dir_prefixes
+
+
 def collect_files(pixi_spec: PixiSpec, working_dir: str) -> dict[str, bytes]:
     """Collect {relpath: content} for the env-defining subset under working_dir.
 
     Contents are raw bytes so the hash and the materialized copy match the
     working_dir exactly (no newline translation, binary files allowed).
+
+    Include entries naming a directory take its whole subtree (dotfiles
+    included); glob entries keep glob semantics (dotfiles skipped). Exclude
+    patterns then filter the selection, except the manifest and its pixi.lock,
+    which define the environment and are always kept.
     """
     files: dict[str, bytes] = {}
 
@@ -84,14 +118,34 @@ def collect_files(pixi_spec: PixiSpec, working_dir: str) -> dict[str, bytes]:
     lock_path = os.path.join(os.path.dirname(manifest_path), "pixi.lock")
     if os.path.exists(lock_path):
         files[os.path.relpath(lock_path, working_dir)] = _read_bytes(lock_path)
+    protected = set(files)
 
-    # include globs may re-match the manifest/lock already collected above;
+    # include entries may re-match the manifest/lock already collected above;
     # dict-key dedup makes that idempotent.
-    for pattern in pixi_spec.include:
-        for match in glob.glob(os.path.join(working_dir, pattern), recursive=True):
-            if os.path.isfile(match):
-                _assert_within(match, working_dir, "include")
-                files[os.path.relpath(match, working_dir)] = _read_bytes(match)
+    for entry in pixi_spec.include:
+        candidate = os.path.join(working_dir, entry)
+        if os.path.isdir(candidate):
+            _assert_within(candidate, working_dir, "include")
+            matches = _walk_files(candidate)
+        else:
+            matches = [
+                m for m in glob.glob(candidate, recursive=True) if os.path.isfile(m)
+            ]
+        for match in matches:
+            _assert_within(match, working_dir, "include")
+            files[os.path.relpath(match, working_dir)] = _read_bytes(match)
+
+    if pixi_spec.exclude:
+        excluded_files, excluded_dir_prefixes = _excluded(pixi_spec, working_dir)
+        files = {
+            rel: content
+            for rel, content in files.items()
+            if rel in protected
+            or (
+                rel not in excluded_files
+                and not any(rel.startswith(p) for p in excluded_dir_prefixes)
+            )
+        }
 
     return files
 
@@ -128,6 +182,7 @@ def compute_project_uri_from_working_dir_uri(
         "working_dir_uri": working_dir_uri,
         "manifest": pixi_spec.manifest,
         "include": pixi_spec.include,
+        "exclude": pixi_spec.exclude,
         "environment": pixi_spec.environment,
         "locked": pixi_spec.locked,
         "pixi_version": pixi_spec.pixi_version,

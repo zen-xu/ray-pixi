@@ -100,6 +100,76 @@ def test_compute_project_uri_stable_and_subset_sensitive(tmp_path):
     assert project.compute_project_uri(s, wd) != a
 
 
+def test_collect_files_include_directory_recursively(tmp_path):
+    # A bare directory entry means "everything under it", dotfiles included --
+    # no fold/**/*.py spelling needed.
+    wd = _wd(tmp_path)
+    nested = tmp_path / "pkg" / "sub"
+    nested.mkdir()
+    (nested / "mod.py").write_text("y = 2\n")
+    (tmp_path / "pkg" / ".env.template").write_text("KEY=\n")
+    s = spec.normalize({"manifest": "pixi.toml", "include": ["pkg"]})
+    files = project.collect_files(s, wd)
+    assert files[os.path.join("pkg", "__init__.py")] == b"x = 1\n"
+    assert files[os.path.join("pkg", "sub", "mod.py")] == b"y = 2\n"
+    assert files[os.path.join("pkg", ".env.template")] == b"KEY=\n"
+
+
+def test_collect_files_include_directory_rejects_escape(tmp_path):
+    wd_root = tmp_path / "wd"
+    wd_root.mkdir()
+    (wd_root / "pixi.toml").write_text("[workspace]\n")
+    (wd_root / "pixi.lock").write_text("version: 6\n")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("s\n")
+    s = spec.normalize({"manifest": "pixi.toml", "include": ["../outside"]})
+    with pytest.raises(ValueError, match="outside"):
+        project.collect_files(s, str(wd_root))
+
+
+def test_collect_files_exclude_removes_matched_files(tmp_path):
+    wd = _wd(tmp_path)
+    (tmp_path / "pkg" / "big.bin").write_bytes(b"\x00")
+    s = spec.normalize(
+        {"manifest": "pixi.toml", "include": ["pkg"], "exclude": ["pkg/*.bin"]}
+    )
+    files = project.collect_files(s, wd)
+    assert os.path.join("pkg", "__init__.py") in files
+    assert os.path.join("pkg", "big.bin") not in files
+
+
+def test_collect_files_exclude_directory_prunes_subtree(tmp_path):
+    # Excluding a directory needs no trailing /**: the whole subtree goes.
+    wd = _wd(tmp_path)
+    tests_dir = tmp_path / "pkg" / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_mod.py").write_text("t = 1\n")
+    s = spec.normalize(
+        {"manifest": "pixi.toml", "include": ["pkg"], "exclude": ["pkg/tests"]}
+    )
+    files = project.collect_files(s, wd)
+    assert os.path.join("pkg", "__init__.py") in files
+    assert os.path.join("pkg", "tests", "test_mod.py") not in files
+
+
+def test_collect_files_exclude_cannot_remove_manifest_or_lock(tmp_path):
+    wd = _wd(tmp_path)
+    s = spec.normalize({"manifest": "pixi.toml", "exclude": ["pixi.toml", "pixi.lock"]})
+    files = project.collect_files(s, wd)
+    assert "pixi.toml" in files
+    assert "pixi.lock" in files
+
+
+def test_uri_from_working_dir_uri_distinguishes_exclude():
+    wd_uri = "gcs://_ray_pkg_0123456789abcdef.zip"
+    base = spec.normalize({"manifest": "pixi.toml"})
+    with_exclude = spec.normalize({"manifest": "pixi.toml", "exclude": ["pkg/tests"]})
+    assert project.compute_project_uri_from_working_dir_uri(
+        base, wd_uri
+    ) != project.compute_project_uri_from_working_dir_uri(with_exclude, wd_uri)
+
+
 def test_uri_from_working_dir_uri_distinguishes_manifest_and_include():
     wd_uri = "gcs://_ray_pkg_0123456789abcdef.zip"
     base = spec.normalize({"manifest": "a/pixi.toml"})

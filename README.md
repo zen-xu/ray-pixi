@@ -74,7 +74,8 @@ ray.init(
 | key | description |
 | --- | --- |
 | `manifest` | working_dir-relative path to a `pixi.toml` / `pyproject.toml` (mutually exclusive with the inline keys) |
-| `include` | extra globs (relative to working_dir) selecting env-defining files, e.g. local package sources for an editable install |
+| `include` | extra globs or directories (relative to working_dir) selecting env-defining files, e.g. local package sources for an editable install; a directory entry takes its whole subtree, dotfiles included (glob entries skip dotfiles) |
+| `exclude` | globs or directories removed from the `include` selection (a directory prunes its subtree); the manifest and `pixi.lock` are always kept |
 | `channels` / `dependencies` / `pypi_dependencies` / `platforms` | inline spec |
 | `environment` | environment to select, defaults to `default` |
 | `locked` | reproduce strictly from `pixi.lock`, defaults to `False` |

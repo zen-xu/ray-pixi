@@ -16,9 +16,10 @@ class PixiSpec(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    # Project mode: a manifest + include globs resolved against the working_dir.
+    # Project mode: a manifest + include/exclude resolved against the working_dir.
     manifest: str | None = None
     include: list[str] = []
+    exclude: list[str] = []
     # Inline mode: dependency keys synthesized into a pixi.toml on each node.
     channels: list[str] = []
     # Values are a version string ("3.13.*") or a pixi match-spec table
@@ -47,12 +48,13 @@ class PixiSpec(BaseModel):
 
     @model_validator(mode="after")
     def _reject_inline_with_project(self) -> PixiSpec:
-        """Inline dependency keys and project keys (manifest/include) are exclusive."""
-        has_project = bool(self.manifest or self.include)
+        """Inline dependency keys and project keys are mutually exclusive."""
+        has_project = bool(self.manifest or self.include or self.exclude)
         if self._has_inline and has_project:
             raise ValueError(
                 "runtime_env['pixi'] cannot specify both inline spec keys "
-                f"({', '.join(INLINE_KEYS)}) and project keys (manifest/include)."
+                f"({', '.join(INLINE_KEYS)}) and project keys "
+                "(manifest/include/exclude)."
             )
         return self
 
@@ -92,6 +94,7 @@ def pixi(
     manifest: str | None = ...,
     *,
     include: list[str] | None = ...,
+    exclude: list[str] | None = ...,
     environment: str = ...,
     locked: bool = ...,
     pixi_version: str | None = ...,
@@ -119,6 +122,7 @@ def pixi(
     manifest: str | None = None,
     *,
     include: list[str] | None = None,
+    exclude: list[str] | None = None,
     channels: list[str] | None = None,
     dependencies: dict[str, str | dict] | None = None,
     pypi_dependencies: dict[str, str | dict] | None = None,
@@ -144,8 +148,12 @@ def pixi(
     Args:
         manifest: working_dir-relative path to a pixi.toml / pyproject.toml
             (project mode). Mutually exclusive with the inline keys.
-        include: globs (relative to working_dir) selecting files into the env cache
-            hash (project mode).
+        include: globs or directories (relative to working_dir) selecting files
+            into the env cache hash (project mode). A directory entry includes
+            its whole subtree, dotfiles included.
+        exclude: globs or directories (relative to working_dir) removed from
+            the include selection; the manifest and pixi.lock are always kept
+            (project mode).
         channels/dependencies/pypi_dependencies/platforms: inline mode keys.
         environment: pixi environment to select (pixi ``-e``).
         locked: reproduce strictly from pixi.lock (``pixi install --locked``).
@@ -165,12 +173,12 @@ def pixi(
         "platforms": platforms,
     }
     has_inline = any(v is not None for v in inline.values())
-    has_project = manifest is not None or include is not None
+    has_project = manifest is not None or include is not None or exclude is not None
 
     if has_inline and has_project:
         raise ValueError(
-            "pixi() cannot take both project keys (manifest/include) and inline "
-            "spec keys."
+            "pixi() cannot take both project keys (manifest/include/exclude) "
+            "and inline spec keys."
         )
 
     common = {
@@ -189,4 +197,9 @@ def pixi(
             **common,
         }
 
-    return {"manifest": manifest, "include": list(include or []), **common}
+    return {
+        "manifest": manifest,
+        "include": list(include or []),
+        "exclude": list(exclude or []),
+        **common,
+    }

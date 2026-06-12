@@ -86,3 +86,21 @@ def test_compute_uri_insensitive_to_dict_key_order():
     a = spec.compute_uri({"dependencies": {"numpy": "1", "pandas": "2"}})
     b = spec.compute_uri({"dependencies": {"pandas": "2", "numpy": "1"}})
     assert a == b
+
+
+def test_exclude_is_project_key():
+    s = spec.normalize({"manifest": "pixi.toml", "exclude": ["pkg/tests"]})
+    assert s.exclude == ["pkg/tests"]
+    assert spec.normalize({"manifest": "pixi.toml"}).exclude == []
+
+
+def test_validate_rejects_inline_with_exclude():
+    with pytest.raises(ValueError, match=r"exclusive|cannot"):
+        spec.normalize({"dependencies": {"python": "*"}, "exclude": ["x"]})
+
+
+def test_pixi_helper_accepts_exclude():
+    field = spec.pixi("pixi.toml", exclude=["pkg/tests"])
+    assert field["exclude"] == ["pkg/tests"]
+    with pytest.raises(ValueError, match="cannot"):
+        spec.pixi(dependencies={"python": "*"}, exclude=["x"])  # ty: ignore[no-matching-overload]
