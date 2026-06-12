@@ -246,3 +246,28 @@ def test_processor_rejects_ray_mismatch(tmp_path):
     proc = _default_proc(target, fake_runner)
     with pytest.raises(RuntimeError, match=r"ray.*does not match"):
         asyncio.run(proc.run())
+
+
+def test_lock_mismatch_failure_carries_fix_hint(tmp_path):
+    # `pixi install --locked` fails in seconds (pre-download) when pixi.lock is
+    # out of sync with the manifest; surface how to fix it instead of leaving
+    # users to decode pixi's error from a node log.
+    async def fake_runner(cmd, *, cwd):
+        raise RuntimeError(
+            "`/fake/pixi install` failed with exit code 1. Last output:\n"
+            "ERROR: lock-file not up-to-date with the project\n"
+        )
+
+    proc = _default_proc(str(tmp_path), fake_runner)
+    with pytest.raises(RuntimeError, match=r"pixi lock"):
+        asyncio.run(proc.run())
+
+
+def test_unrelated_failure_keeps_original_error(tmp_path):
+    async def fake_runner(cmd, *, cwd):
+        raise RuntimeError("`/fake/pixi install` failed with exit code 1. boom")
+
+    proc = _default_proc(str(tmp_path), fake_runner)
+    with pytest.raises(RuntimeError, match="boom") as excinfo:
+        asyncio.run(proc.run())
+    assert "pixi lock" not in str(excinfo.value)

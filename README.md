@@ -37,8 +37,9 @@ from ray_pixi import pixi
 
 ray.init(
     runtime_env={
-        # project mode: the manifest (and its pixi.lock) travel via working_dir
-        "pixi": pixi("pixi.toml", environment="default", locked=True),
+        # project mode: the manifest (and its pixi.lock) travel via working_dir;
+        # installs are locked to pixi.lock by default
+        "pixi": pixi("pixi.toml", environment="default"),
         "working_dir": ".",
     }
 )
@@ -78,7 +79,7 @@ ray.init(
 | `exclude` | globs or directories removed from the `include` selection (a directory prunes its subtree); the manifest and `pixi.lock` are always kept |
 | `channels` / `dependencies` / `pypi_dependencies` / `platforms` | inline spec |
 | `environment` | environment to select, defaults to `default` |
-| `locked` | reproduce strictly from `pixi.lock`, defaults to `False` |
+| `locked` | reproduce strictly from `pixi.lock` (`pixi install --locked`). Defaults to `True` in project mode — without it, an out-of-date lock would make each node re-solve independently and nodes could build **different** environments under the same cache hash. An out-of-sync lock fails fast (pre-download) with a hint to run `pixi lock`. Defaults to `False` inline |
 | `pixi_version` | if set, bootstrap this pixi version on the node |
 | `pixi_install_options` | extra flags passed through to `pixi install` |
 
@@ -154,8 +155,12 @@ Two knobs matter in practice — set both in the node environment **before
 - **`PIXI_CACHE_DIR`** (pixi's global package cache, defaults to
   `~/.cache/rattler`). Point it at a persistent volume in containerized
   deployments. Even when an environment is evicted, reinstalling from a warm
-  package cache (plus `locked: true`, which skips the solve) is mostly a
-  re-link — seconds instead of the minutes a cold first install takes.
+  package cache (with the default locked install, which never solves) is
+  mostly a re-link — seconds instead of the minutes a cold first install
+  takes. For multi-node clusters, also point pixi at an intranet conda/PyPI
+  mirror (pixi's `mirrors` config): with no solve, a local mirror, and a warm
+  cache, per-node cold start is bounded by link speed, which is why ray-pixi
+  ships no environment-distribution layer of its own.
 
 In project mode, eviction usually costs nothing anyway: environments are
 stored content-addressed by the env-defining subset, so URIs that differ only
@@ -163,7 +168,24 @@ in unrelated working_dir files share one store entry, and the entry is removed
 only when its last referencing URI is evicted.
 
 If a specific environment must never be evicted, a long-lived detached actor
-declared with that runtime_env keeps its reference count above zero.
+declared with that runtime_env keeps its reference count above zero — eviction
+only ever touches environments whose count has dropped to zero:
+
+```python
+@ray.remote(num_cpus=0)
+class EnvPin:
+    """Holds a runtime_env reference on every node it is scheduled on."""
+
+ray.init(...)
+EnvPin.options(
+    name="pin-my-env", namespace="env-pins", lifetime="detached",
+    runtime_env={"pixi": pixi("pixi.toml"), "working_dir": "."},
+).remote()
+# release later: ray.kill(ray.get_actor("pin-my-env", namespace="env-pins"))
+```
+
+Note the pin only covers nodes the actor was scheduled on; it is a pin, not a
+cluster-wide warm-up.
 
 ## Known interactions
 

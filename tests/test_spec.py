@@ -9,7 +9,7 @@ def test_str_field_becomes_manifest_path():
     assert out.manifest == "pixi.toml"
     assert out.include == []
     assert out.environment == "default"
-    assert out.locked is False
+    assert out.locked is True  # project mode locks by default
 
 
 def test_inline_spec_source():
@@ -104,3 +104,26 @@ def test_pixi_helper_accepts_exclude():
     assert field["exclude"] == ["pkg/tests"]
     with pytest.raises(ValueError, match="cannot"):
         spec.pixi(dependencies={"python": "*"}, exclude=["x"])  # ty: ignore[no-matching-overload]
+
+
+def test_locked_defaults_true_in_project_mode():
+    # Without --locked, an out-of-date pixi.lock makes each node re-solve at
+    # install time, so nodes could build DIFFERENT environments under the SAME
+    # store hash. Project mode therefore locks by default.
+    assert spec.normalize({"manifest": "pixi.toml"}).locked is True
+    assert spec.normalize({}).locked is True  # auto-discovered project mode
+    assert spec.normalize({"manifest": "pixi.toml", "locked": False}).locked is False
+
+
+def test_locked_defaults_false_in_inline_mode():
+    # Inline mode synthesizes a manifest with no lockfile; nothing to lock to.
+    assert spec.normalize({"dependencies": {"python": "*"}}).locked is False
+    assert (
+        spec.normalize({"dependencies": {"python": "*"}, "locked": True}).locked is True
+    )
+
+
+def test_pixi_helper_locked_follows_mode_default():
+    assert spec.normalize(spec.pixi("pixi.toml")).locked is True
+    assert spec.normalize(spec.pixi("pixi.toml", locked=False)).locked is False
+    assert spec.normalize(spec.pixi(dependencies={"python": "*"})).locked is False

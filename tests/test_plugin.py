@@ -651,3 +651,55 @@ def test_create_keeps_target_on_failure_when_enabled(tmp_path, monkeypatch):
     plugin = PixiPlugin(str(tmp_path / "res"))
     target = _run_failing_create(plugin, monkeypatch)
     assert os.path.exists(target)
+
+
+def test_modify_context_quotes_paths_with_spaces(tmp_path, monkeypatch):
+    # Ray splices py_executable unquoted into `bash -c`; a space in the
+    # resource dir (or session path) must not split the manifest path.
+    import asyncio
+    import shlex
+
+    import ray_pixi.binary as binary_mod
+    import ray_pixi.plugin as plugin_mod
+
+    _project_wd(tmp_path, monkeypatch)
+    plugin = PixiPlugin(str(tmp_path / "re s"))  # resource dir with a space
+    runtime_env = {"pixi": {"manifest": "pixi.toml"}, "working_dir": "gcs://_a.zip"}
+    uri = plugin.get_uris(runtime_env)[0]
+    monkeypatch.setattr(plugin, "_resolve_pixi", lambda s, t: "/fake/pixi")
+    monkeypatch.setattr(plugin_mod, "PixiProcessor", _env_creating_proc([]))
+    asyncio.run(plugin.create(uri, runtime_env, None, logging.getLogger("t")))
+
+    monkeypatch.setattr(binary_mod, "resolve_pixi", lambda td, v: "/fake/pixi")
+    ctx = _Ctx()
+    plugin.modify_context([uri], runtime_env, ctx, logging.getLogger("t"))
+
+    tokens = shlex.split(ctx.py_executable)
+    manifest_token = tokens[tokens.index("--manifest-path") + 1]
+    assert " " in manifest_token  # spaced path survived shell splitting whole
+    assert os.path.exists(manifest_token)
+
+
+def test_init_sweeps_incomplete_store_entries(tmp_path):
+    # An agent crash mid-install leaves a store entry without the OK marker;
+    # nothing references it and create() would never reuse it, so it is dead
+    # weight that no GC path covers. Complete entries stay: a future create
+    # with the same content hash re-adopts them.
+    res = str(tmp_path / "res")
+    store = tmp_path / "res" / "pixi" / "store"
+    complete = store / "aaa"
+    partial = store / "bbb"
+    os.makedirs(complete)
+    os.makedirs(partial)
+    (complete / ".ray-pixi-ok").write_text("pixi://aaa")
+    (partial / "pixi.toml").write_text("[workspace]\n")
+    log_pixi_dir = tmp_path / "logs" / "pixi"
+    os.makedirs(log_pixi_dir)
+    stale_log = log_pixi_dir / "install-20990101000000-bbb.log"
+    stale_log.write_text("partial install output\n")
+
+    PixiPlugin(res, str(tmp_path / "logs"))
+
+    assert os.path.isdir(complete)
+    assert not os.path.exists(partial)
+    assert not stale_log.exists()

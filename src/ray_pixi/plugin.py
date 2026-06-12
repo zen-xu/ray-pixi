@@ -7,6 +7,7 @@ import contextlib
 import glob
 import logging
 import os
+import shlex
 import shutil
 import sys
 import tempfile
@@ -96,6 +97,29 @@ class PixiPlugin(RuntimeEnvPlugin):
         self._created_hash_bytes: dict[str, int] = {}
         try_to_create_directory(self._resource_dir)
         try_to_create_directory(self._log_dir)
+        self._sweep_incomplete_stores()
+
+    def _sweep_incomplete_stores(self) -> None:
+        """Remove store entries left half-installed by an agent crash.
+
+        Entries without the OK marker can never be reused by create() and no
+        GC path covers them (GC is keyed off pointer files). Complete entries
+        stay: a future create with the same content hash re-adopts them.
+        """
+        store_root = os.path.join(self._resource_dir, "store")
+        if not os.path.isdir(store_root):
+            return
+        for entry in os.listdir(store_root):
+            entry_dir = os.path.join(store_root, entry)
+            if not os.path.isdir(entry_dir) or os.path.exists(
+                os.path.join(entry_dir, _OK_MARKER)
+            ):
+                continue
+            default_logger.info(
+                "Sweeping incomplete pixi store entry %s (no OK marker).", entry_dir
+            )
+            shutil.rmtree(entry_dir, ignore_errors=True)
+            self._remove_install_logs_for(entry)
 
     @staticmethod
     def validate(runtime_env_dict: dict) -> None:
@@ -362,10 +386,12 @@ class PixiPlugin(RuntimeEnvPlugin):
             manifest_path = project.main_manifest_path(pixi_spec, env_root)
         # --frozen --no-install: the env was fully installed by create();
         # worker startup must not re-solve or touch the lockfile (slow, and
-        # concurrent workers would race on the shared env dir).
+        # concurrent workers would race on the shared env dir). Quoted because
+        # Ray splices py_executable unquoted into the worker's `bash -c` line.
         context.py_executable = (
-            f"{pixi_exe} run --manifest-path {manifest_path} "
-            f"--frozen --no-install -e {env_name} python"
+            f"{shlex.quote(pixi_exe)} run "
+            f"--manifest-path {shlex.quote(manifest_path)} "
+            f"--frozen --no-install -e {shlex.quote(env_name)} python"
         )
 
     def _gc_store(self, store_hash: str, logger: logging.Logger) -> int:

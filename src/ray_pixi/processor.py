@@ -17,6 +17,13 @@ Runner = Callable[..., Awaitable[None]]
 _LOG_TAIL_BYTES = 4096
 
 
+def _looks_like_lock_mismatch(error_text: str) -> bool:
+    """Match pixi's --locked failure across wording variants
+    ("lock-file"/"lockfile", "not up-to-date")."""
+    normalized = error_text.lower().replace("-", " ").replace("_", " ")
+    return "lock" in normalized and "up to date" in normalized
+
+
 def _tail(log_path: str, max_bytes: int = _LOG_TAIL_BYTES) -> str:
     try:
         with open(log_path, "rb") as f:
@@ -104,7 +111,19 @@ class PixiProcessor:
             self._target_dir,
             self._log_path,
         )
-        await self._runner(cmd, cwd=self._target_dir)
+        try:
+            await self._runner(cmd, cwd=self._target_dir)
+        except RuntimeError as e:
+            if self._spec.locked and _looks_like_lock_mismatch(str(e)):
+                raise RuntimeError(
+                    f"{e}\n"
+                    "Hint: pixi.lock is out of date with the manifest. Run "
+                    "`pixi lock` (or `pixi install`) locally, include the "
+                    "updated pixi.lock in your working_dir, and resubmit. "
+                    "(Project mode installs with --locked by default; pass "
+                    "locked=False to opt out.)"
+                ) from e
+            raise
         self._verify_versions()
 
     def _verify_versions(self) -> None:

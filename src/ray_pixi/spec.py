@@ -28,7 +28,8 @@ class PixiSpec(BaseModel):
     pypi_dependencies: dict[str, str | dict] = {}
     platforms: list[str] = []
     environment: str = "default"
-    locked: bool = False
+    # None resolves by mode: project -> True, inline -> False (see validator).
+    locked: bool | None = None
     pixi_version: str | None = None
     pixi_install_options: list[str] = []
 
@@ -56,6 +57,16 @@ class PixiSpec(BaseModel):
                 f"({', '.join(INLINE_KEYS)}) and project keys "
                 "(manifest/include/exclude)."
             )
+        return self
+
+    @model_validator(mode="after")
+    def _default_locked_by_mode(self) -> PixiSpec:
+        """Project mode locks by default: without --locked an out-of-date
+        pixi.lock would make each node re-solve independently, producing
+        different environments under the same store hash. Inline mode has no
+        lockfile to lock to."""
+        if self.locked is None:
+            self.locked = self.source == "project"
         return self
 
 
@@ -96,7 +107,7 @@ def pixi(
     include: list[str] | None = ...,
     exclude: list[str] | None = ...,
     environment: str = ...,
-    locked: bool = ...,
+    locked: bool | None = ...,
     pixi_version: str | None = ...,
     pixi_install_options: list[str] | None = ...,
 ) -> dict:
@@ -111,7 +122,7 @@ def pixi(
     pypi_dependencies: dict[str, str | dict] | None = ...,
     platforms: list[str] | None = ...,
     environment: str = ...,
-    locked: bool = ...,
+    locked: bool | None = ...,
     pixi_version: str | None = ...,
     pixi_install_options: list[str] | None = ...,
 ) -> dict:
@@ -128,7 +139,7 @@ def pixi(
     pypi_dependencies: dict[str, str | dict] | None = None,
     platforms: list[str] | None = None,
     environment: str = "default",
-    locked: bool = False,
+    locked: bool | None = None,
     pixi_version: str | None = None,
     pixi_install_options: list[str] | None = None,
 ) -> dict:
@@ -157,6 +168,7 @@ def pixi(
         channels/dependencies/pypi_dependencies/platforms: inline mode keys.
         environment: pixi environment to select (pixi ``-e``).
         locked: reproduce strictly from pixi.lock (``pixi install --locked``).
+            Defaults to True in project mode, False in inline mode.
         pixi_version: bootstrap this exact pixi version on the node if set.
         pixi_install_options: extra flags forwarded to ``pixi install``.
 
