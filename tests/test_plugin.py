@@ -717,15 +717,18 @@ def test_reference_table_decrease_balances_with_ray(tmp_path):
     # during decrease_reference is what surfaced as the raylet's "Delete runtime
     # env failed". Project mode without working_dir is the shape Ray Client sent.
     from ray._private.runtime_env.agent.runtime_env_agent import ReferenceTable
+    from ray.runtime_env import RuntimeEnv
 
     plugin = PixiPlugin(str(tmp_path))
-    env = {"pixi": {"manifest": "pixi.toml"}}
+    env = RuntimeEnv(pixi={"manifest": "pixi.toml"})
+    serialized = env.serialize()
+    # Mirrors the agent's own uris_parser, whose annotation says Tuple but which
+    # actually returns a list of (uri, type) pairs for every plugin.
     table = ReferenceTable(
-        uris_parser=lambda _re: [(u, "pixi") for u in plugin.get_uris(env)],
+        uris_parser=lambda re: [(u, "pixi") for u in plugin.get_uris(re)],  # ty: ignore[invalid-argument-type]
         unused_uris_callback=lambda uris: None,
         unused_runtime_env_callback=lambda e: None,
     )
-    serialized = '{"pixi": {"manifest": "pixi.toml"}}'
     table.increase_reference(env, serialized, "raylet")
     table.decrease_reference(env, serialized, "raylet")  # must not raise
     assert table.runtime_env_refs == {}
