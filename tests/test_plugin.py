@@ -56,10 +56,17 @@ def test_get_uris_project_differs_by_working_dir_uri(tmp_path):
     assert a[0] == same[0]
 
 
-def test_get_uris_project_without_working_dir_raises(tmp_path):
+def test_get_uris_never_raises_on_bad_input(tmp_path):
+    # Ray's ReferenceTable.uris_parser calls get_uris on every plugin for every
+    # runtime env, and decrease_reference calls it after already decrementing the
+    # env refcount. A raise there fails DeleteRuntimeEnvIfPossible ("Delete
+    # runtime env failed" in the raylet log) and leaks the URI refcount forever,
+    # so delete_uri never runs. validate() rejects bad input on the driver.
     plugin = PixiPlugin(str(tmp_path))
-    with pytest.raises(ValueError, match="working_dir"):
-        plugin.get_uris({"pixi": {"manifest": "pixi.toml"}})
+    assert plugin.get_uris({"pixi": {"manifest": "pixi.toml"}}) == []
+    assert plugin.get_uris({"pixi": {"manifest": "p.toml", "channels": ["x"]}}) == []
+    assert plugin.get_uris({"pixi": "not-a-dict"}) == []
+    assert plugin.get_uris({"pixi": {"environment": object()}}) == []
 
 
 def test_get_uris_empty_without_field(tmp_path):
@@ -703,3 +710,26 @@ def test_init_sweeps_incomplete_store_entries(tmp_path):
     assert os.path.isdir(complete)
     assert not os.path.exists(partial)
     assert not stale_log.exists()
+
+
+def test_reference_table_decrease_balances_with_ray(tmp_path):
+    # End-to-end against Ray's real ReferenceTable: an exception from get_uris
+    # during decrease_reference is what surfaced as the raylet's "Delete runtime
+    # env failed". Project mode without working_dir is the shape Ray Client sent.
+    from ray._private.runtime_env.agent.runtime_env_agent import ReferenceTable
+    from ray.runtime_env import RuntimeEnv
+
+    plugin = PixiPlugin(str(tmp_path))
+    env = RuntimeEnv(pixi={"manifest": "pixi.toml"})
+    serialized = env.serialize()
+    # Mirrors the agent's own uris_parser, whose annotation says Tuple but which
+    # actually returns a list of (uri, type) pairs for every plugin.
+    table = ReferenceTable(
+        uris_parser=lambda re: [(u, "pixi") for u in plugin.get_uris(re)],  # ty: ignore[invalid-argument-type]
+        unused_uris_callback=lambda uris: None,
+        unused_runtime_env_callback=lambda e: None,
+    )
+    table.increase_reference(env, serialized, "raylet")
+    table.decrease_reference(env, serialized, "raylet")  # must not raise
+    assert table.runtime_env_refs == {}
+    assert table._uri_reference == {}

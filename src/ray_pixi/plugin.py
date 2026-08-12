@@ -175,25 +175,35 @@ class PixiPlugin(RuntimeEnvPlugin):
                 os.remove(path)
 
     def get_uris(self, runtime_env) -> list[str]:
+        # Must never raise. Ray's ReferenceTable.uris_parser calls get_uris on
+        # every registered plugin for every runtime env, and decrease_reference
+        # calls it *after* already decrementing the env-level refcount. An
+        # exception here therefore both fails the DeleteRuntimeEnvIfPossible RPC
+        # (raylet logs "Delete runtime env failed") and permanently leaks the URI
+        # refcount, so delete_uri never runs and envs are never GC'd. Malformed
+        # input is rejected by validate() on the driver instead.
         field = runtime_env.get("pixi")
         if not field:
             return []
-        pixi_spec = spec.normalize(field)
-        if pixi_spec.source == "inline":
-            return [spec.compute_uri(field)]
-        # get_uris runs in the agent's increase_reference phase, before Ray has
-        # downloaded the working_dir, so its files cannot be read here. Derive
-        # the URI from the working_dir URI Ray already computed; create() then
-        # dedups actual installs by the env-defining content hash (the store).
-        working_dir_uri = runtime_env.get("working_dir", "")
-        if not working_dir_uri:
-            raise ValueError(
-                "pixi project mode requires runtime_env['working_dir'] so the "
-                "manifest and sources reach the workers."
-            )
-        return [
-            project.compute_project_uri_from_working_dir_uri(pixi_spec, working_dir_uri)
-        ]
+        try:
+            pixi_spec = spec.normalize(field)
+            if pixi_spec.source == "inline":
+                return [spec.compute_uri(field)]
+            # get_uris runs in the agent's increase_reference phase, before Ray
+            # has downloaded the working_dir, so its files cannot be read here.
+            # Derive the URI from the working_dir URI Ray already computed;
+            # create() then dedups actual installs by the env-defining content
+            # hash (the store).
+            working_dir_uri = runtime_env.get("working_dir", "")
+            if not working_dir_uri:
+                return []
+            return [
+                project.compute_project_uri_from_working_dir_uri(
+                    pixi_spec, working_dir_uri
+                )
+            ]
+        except Exception:
+            return []
 
     def _resolve_pixi(self, pixi_spec: spec.PixiSpec, target_dir: str) -> str:
         if pixi_spec.pixi_version:
