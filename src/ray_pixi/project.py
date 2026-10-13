@@ -19,14 +19,25 @@ import hashlib
 import json
 import os
 
+from ray._private.runtime_env.context import RuntimeEnvContext
+
 from ray_pixi.spec import PixiSpec
 
-WORKING_DIR_ENV_VAR = "RAY_RUNTIME_ENV_CREATE_WORKING_DIR"
 
+def resolve_working_dir(context: RuntimeEnvContext | None) -> str | None:
+    """Read the local working_dir from Ray's per-request worker context.
 
-def resolve_working_dir() -> str | None:
-    """Return the local working_dir path Ray exposes to plugins, or None."""
-    return os.environ.get(WORKING_DIR_ENV_VAR)
+    WorkingDirPlugin runs first and prepends ``cd <path> &&`` (``cd /d`` on
+    Windows). Its path is a separate list element, even when it contains spaces.
+    Unlike RAY_RUNTIME_ENV_CREATE_WORKING_DIR, this context is not shared by
+    concurrent runtime-env setup requests.
+    """
+    if context is None:
+        return None
+    match context.command_prefix:
+        case ["cd", "/d", working_dir, "&&", *_] | ["cd", working_dir, "&&", *_]:
+            return working_dir
+    return None
 
 
 def _assert_within(path: str, base: str, label: str) -> None:

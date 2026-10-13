@@ -1,6 +1,7 @@
 import os
 
 import pytest
+from ray._private.runtime_env.context import RuntimeEnvContext
 
 from ray_pixi import project, spec
 
@@ -16,14 +17,25 @@ def _wd(tmp_path):
     return str(tmp_path)
 
 
-def test_resolve_working_dir_reads_env(monkeypatch):
-    monkeypatch.setenv("RAY_RUNTIME_ENV_CREATE_WORKING_DIR", "/wd")
-    assert project.resolve_working_dir() == "/wd"
+@pytest.mark.parametrize(
+    "prefix, expected",
+    [
+        (["cd", "/ray session/wd", "&&"], "/ray session/wd"),
+        (["cd", "/d", r"C:\ray session\wd", "&&"], r"C:\ray session\wd"),
+        (["cd", "/wd", "&&", "echo ready", "&&"], "/wd"),
+        ([], None),
+        (["cd", "/wd"], None),
+    ],
+)
+def test_resolve_working_dir_reads_context(prefix, expected, monkeypatch):
+    monkeypatch.setenv("RAY_RUNTIME_ENV_CREATE_WORKING_DIR", "/another-request")
+    context = RuntimeEnvContext(command_prefix=prefix)
+    assert project.resolve_working_dir(context) == expected
 
 
-def test_resolve_working_dir_none_when_absent(monkeypatch):
-    monkeypatch.delenv("RAY_RUNTIME_ENV_CREATE_WORKING_DIR", raising=False)
-    assert project.resolve_working_dir() is None
+def test_resolve_working_dir_none_without_context(monkeypatch):
+    monkeypatch.setenv("RAY_RUNTIME_ENV_CREATE_WORKING_DIR", "/another-request")
+    assert project.resolve_working_dir(None) is None
 
 
 def test_main_manifest_path_explicit(tmp_path):

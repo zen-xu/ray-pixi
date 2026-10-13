@@ -7,9 +7,11 @@ from ray_pixi.plugin import PixiPlugin
 
 
 class _Ctx:
-    def __init__(self):
+    def __init__(self, working_dir=None):
         self.py_executable: str = ""
-        self.command_prefix: list = []
+        self.command_prefix: list = (
+            ["cd", str(working_dir), "&&"] if working_dir is not None else []
+        )
         self.env_vars: dict = {}
 
 
@@ -114,12 +116,11 @@ def test_modify_context_inline_sets_py_executable(tmp_path, monkeypatch):
     assert ctx.py_executable.endswith("-e default python")
 
 
-def _project_wd(tmp_path, monkeypatch):
+def _project_wd(tmp_path):
     wd = tmp_path / "wd"
     wd.mkdir()
     (wd / "pixi.toml").write_text("[workspace]\n")
     (wd / "pixi.lock").write_text("version: 6\n")
-    monkeypatch.setenv("RAY_RUNTIME_ENV_CREATE_WORKING_DIR", str(wd))
     return wd
 
 
@@ -143,7 +144,7 @@ def test_modify_context_project_resolves_store_manifest(tmp_path, monkeypatch):
     import ray_pixi.binary as binary_mod
     import ray_pixi.plugin as plugin_mod
 
-    _project_wd(tmp_path, monkeypatch)
+    ctx = _Ctx(_project_wd(tmp_path))
     plugin = PixiPlugin(str(tmp_path / "res"))
     field = {"manifest": "pixi.toml", "environment": "default"}
     runtime_env = {"pixi": field, "working_dir": "gcs://_ray_pkg_x.zip"}
@@ -151,10 +152,9 @@ def test_modify_context_project_resolves_store_manifest(tmp_path, monkeypatch):
 
     monkeypatch.setattr(plugin, "_resolve_pixi", lambda s, t: "/fake/pixi")
     monkeypatch.setattr(plugin_mod, "PixiProcessor", _env_creating_proc([]))
-    asyncio.run(plugin.create(uri, runtime_env, None, logging.getLogger("t")))
+    asyncio.run(plugin.create(uri, runtime_env, ctx, logging.getLogger("t")))
 
     monkeypatch.setattr(binary_mod, "resolve_pixi", lambda td, v: "/fake/pixi")
-    ctx = _Ctx()
     plugin.modify_context([uri], runtime_env, ctx, logging.getLogger("t"))
     store_root = os.path.join(plugin._resource_dir, "store")
     assert ctx.py_executable.startswith(f"/fake/pixi run --manifest-path {store_root}")
@@ -170,7 +170,7 @@ def test_create_project_dedups_by_content(tmp_path, monkeypatch):
 
     import ray_pixi.plugin as plugin_mod
 
-    _project_wd(tmp_path, monkeypatch)
+    ctx = _Ctx(_project_wd(tmp_path))
     plugin = PixiPlugin(str(tmp_path / "res"))
     field = {"manifest": "pixi.toml"}
     env1 = {"pixi": field, "working_dir": "gcs://_ray_pkg_aaa.zip"}
@@ -184,8 +184,8 @@ def test_create_project_dedups_by_content(tmp_path, monkeypatch):
     monkeypatch.setattr(plugin_mod, "PixiProcessor", _env_creating_proc(runs))
 
     async def main():
-        await plugin.create(uri1, env1, None, logging.getLogger("t"))
-        await plugin.create(uri2, env2, None, logging.getLogger("t"))
+        await plugin.create(uri1, env1, ctx, logging.getLogger("t"))
+        await plugin.create(uri2, env2, ctx, logging.getLogger("t"))
 
     asyncio.run(main())
 
@@ -204,7 +204,7 @@ def test_delete_uri_keeps_store_until_last_reference(tmp_path, monkeypatch):
 
     import ray_pixi.plugin as plugin_mod
 
-    _project_wd(tmp_path, monkeypatch)
+    ctx = _Ctx(_project_wd(tmp_path))
     plugin = PixiPlugin(str(tmp_path / "res"))
     field = {"manifest": "pixi.toml"}
     env1 = {"pixi": field, "working_dir": "gcs://_ray_pkg_aaa.zip"}
@@ -216,8 +216,8 @@ def test_delete_uri_keeps_store_until_last_reference(tmp_path, monkeypatch):
     monkeypatch.setattr(plugin_mod, "PixiProcessor", _env_creating_proc([]))
 
     async def main():
-        await plugin.create(uri1, env1, None, logging.getLogger("t"))
-        await plugin.create(uri2, env2, None, logging.getLogger("t"))
+        await plugin.create(uri1, env1, ctx, logging.getLogger("t"))
+        await plugin.create(uri2, env2, ctx, logging.getLogger("t"))
 
     asyncio.run(main())
     with open(os.path.join(plugin._target_dir(uri1), "STORE")) as f:
@@ -241,7 +241,7 @@ def test_size_accounting_balances_for_shared_store(tmp_path, monkeypatch):
 
     import ray_pixi.plugin as plugin_mod
 
-    _project_wd(tmp_path, monkeypatch)
+    ctx = _Ctx(_project_wd(tmp_path))
     plugin = PixiPlugin(str(tmp_path / "res"))
     field = {"manifest": "pixi.toml"}
     env1 = {"pixi": field, "working_dir": "gcs://_ray_pkg_aaa.zip"}
@@ -253,8 +253,8 @@ def test_size_accounting_balances_for_shared_store(tmp_path, monkeypatch):
     monkeypatch.setattr(plugin_mod, "PixiProcessor", _env_creating_proc([]))
 
     async def main():
-        s1 = await plugin.create(uri1, env1, None, logging.getLogger("t"))
-        s2 = await plugin.create(uri2, env2, None, logging.getLogger("t"))
+        s1 = await plugin.create(uri1, env1, ctx, logging.getLogger("t"))
+        s2 = await plugin.create(uri2, env2, ctx, logging.getLogger("t"))
         return s1, s2
 
     size1, size2 = asyncio.run(main())
@@ -290,7 +290,7 @@ def test_create_project_writes_pointer_atomically(tmp_path, monkeypatch):
 
     import ray_pixi.plugin as plugin_mod
 
-    _project_wd(tmp_path, monkeypatch)
+    ctx = _Ctx(_project_wd(tmp_path))
     plugin = PixiPlugin(str(tmp_path / "res"))
     runtime_env = {"pixi": {"manifest": "pixi.toml"}, "working_dir": "gcs://_a.zip"}
     uri = plugin.get_uris(runtime_env)[0]
@@ -302,7 +302,7 @@ def test_create_project_writes_pointer_atomically(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(plugin, "_resolve_pixi", lambda s, t: "/fake/pixi")
     monkeypatch.setattr(plugin_mod, "PixiProcessor", _env_creating_proc([]))
-    asyncio.run(plugin.create(uri, runtime_env, None, logging.getLogger("t")))
+    asyncio.run(plugin.create(uri, runtime_env, ctx, logging.getLogger("t")))
 
     assert any(p.endswith(plugin_mod._POINTER_FILE) for p in written)
 
@@ -365,7 +365,7 @@ def test_delete_uri_removes_install_logs(tmp_path, monkeypatch):
 
     import ray_pixi.plugin as plugin_mod
 
-    _project_wd(tmp_path, monkeypatch)
+    ctx = _Ctx(_project_wd(tmp_path))
     plugin = PixiPlugin(str(tmp_path / "res"))
     field = {"manifest": "pixi.toml"}
     runtime_env = {"pixi": field, "working_dir": "gcs://_ray_pkg_x.zip"}
@@ -373,7 +373,7 @@ def test_delete_uri_removes_install_logs(tmp_path, monkeypatch):
 
     monkeypatch.setattr(plugin, "_resolve_pixi", lambda s, t: "/fake/pixi")
     monkeypatch.setattr(plugin_mod, "PixiProcessor", _env_creating_proc([]))
-    asyncio.run(plugin.create(uri, runtime_env, None, logging.getLogger("t")))
+    asyncio.run(plugin.create(uri, runtime_env, ctx, logging.getLogger("t")))
 
     with open(os.path.join(plugin._target_dir(uri), "STORE")) as f:
         store_hash = f.read().strip()
@@ -397,7 +397,7 @@ def test_create_project_failure_cleans_store(tmp_path, monkeypatch):
     import ray_pixi.plugin as plugin_mod
 
     monkeypatch.delenv("RAY_PIXI_KEEP_ON_FAILURE", raising=False)
-    _project_wd(tmp_path, monkeypatch)
+    ctx = _Ctx(_project_wd(tmp_path))
     plugin = PixiPlugin(str(tmp_path / "res"))
     field = {"manifest": "pixi.toml"}
     runtime_env = {"pixi": field, "working_dir": "gcs://_ray_pkg_x.zip"}
@@ -414,7 +414,7 @@ def test_create_project_failure_cleans_store(tmp_path, monkeypatch):
 
     monkeypatch.setattr(plugin_mod, "PixiProcessor", FailingProc)
     with pytest.raises(RuntimeError, match="install failed"):
-        asyncio.run(plugin.create(uri, runtime_env, None, logging.getLogger("t")))
+        asyncio.run(plugin.create(uri, runtime_env, ctx, logging.getLogger("t")))
 
     store_root = os.path.join(plugin._resource_dir, "store")
     assert not os.path.exists(store_root) or os.listdir(store_root) == []
@@ -450,6 +450,7 @@ def test_create_inline_materializes_and_runs(tmp_path, monkeypatch):
     import ray_pixi.manifest as manifest_mod
     import ray_pixi.plugin as plugin_mod
 
+    monkeypatch.delenv("RAY_RUNTIME_ENV_CREATE_WORKING_DIR", raising=False)
     plugin = PixiPlugin(str(tmp_path / "res"))
     field = {"channels": ["conda-forge"]}
     uri = plugin.get_uris({"pixi": field})[0]
@@ -487,7 +488,7 @@ def test_create_project_materializes_from_working_dir(tmp_path, monkeypatch):
     wd = tmp_path / "wd"
     wd.mkdir()
     (wd / "pixi.toml").write_text("[workspace]\n")
-    monkeypatch.setenv("RAY_RUNTIME_ENV_CREATE_WORKING_DIR", str(wd))
+    ctx = _Ctx(wd)
     plugin = PixiPlugin(str(tmp_path / "res"))
     field = {"manifest": "pixi.toml"}
     runtime_env = {"pixi": field, "working_dir": "gcs://_ray_pkg_x.zip"}
@@ -510,9 +511,96 @@ def test_create_project_materializes_from_working_dir(tmp_path, monkeypatch):
             seen["ran"] = True
 
     monkeypatch.setattr(plugin_mod, "PixiProcessor", FakeProc)
-    asyncio.run(plugin.create(uri, runtime_env, None, logging.getLogger("t")))
+    asyncio.run(plugin.create(uri, runtime_env, ctx, logging.getLogger("t")))
     assert seen["ran"] is True
     assert seen["working_dir"] == str(wd)
+
+
+@pytest.mark.parametrize("yield_before_create", [False, True])
+@pytest.mark.parametrize("same_content", [False, True])
+def test_concurrent_projects_use_request_working_dir(
+    tmp_path, monkeypatch, yield_before_create, same_content
+):
+    import asyncio
+
+    from ray._private.runtime_env.context import RuntimeEnvContext
+    from ray._private.runtime_env.packaging import get_local_dir_from_uri
+    from ray._private.runtime_env.working_dir import WorkingDirPlugin
+    from ray.runtime_env import RuntimeEnv
+
+    import ray_pixi.plugin as plugin_mod
+    from ray_pixi import project, spec
+
+    # Use Ray's actual context population and global-env context manager.
+    # Distinct uploads may define different environments or share one store.
+    working_dirs = WorkingDirPlugin(str(tmp_path / "ray session"), None)
+    plugin = PixiPlugin(str(tmp_path / "res"))
+    field = {"manifest": "pixi.toml"}
+    envs = [
+        RuntimeEnv(pixi=field, working_dir=f"gcs://_ray_pkg_{name}.zip")
+        for name in ("a", "b")
+    ]
+    paths = []
+    contexts = []
+    for i, env in enumerate(envs):
+        path = get_local_dir_from_uri(env["working_dir"], working_dirs._resources_dir)
+        path.mkdir(parents=True)
+        name = "shared" if same_content else f"project-{i}"
+        (path / "pixi.toml").write_text(f'[workspace]\nname = "{name}"\n')
+        (path / "pixi.lock").write_text("version: 6\n")
+        (path / "driver.py").write_text(f"print({i})\n")
+        context = RuntimeEnvContext()
+        working_dirs.modify_context([env["working_dir"]], env, context)
+        paths.append(path)
+        contexts.append(context)
+
+    runs = []
+    monkeypatch.setenv("RAY_RUNTIME_ENV_CREATE_WORKING_DIR", "/another-request")
+    monkeypatch.setattr(plugin, "_resolve_pixi", lambda s, t: "/fake/pixi")
+    monkeypatch.setattr(plugin_mod, "PixiProcessor", _env_creating_proc(runs))
+
+    async def create(env, context):
+        with working_dirs.with_working_dir_env(env["working_dir"]):
+            if yield_before_create:
+                # An earlier plugin can yield while the process-global env var
+                # is set, before this request even enters PixiPlugin.create().
+                await asyncio.sleep(0)
+            await plugin.create(plugin.get_uris(env)[0], env, context)
+
+    async def main():
+        await asyncio.gather(
+            *(create(env, ctx) for env, ctx in zip(envs, contexts, strict=True))
+        )
+
+    asyncio.run(main())
+
+    assert len(runs) == (1 if same_content else 2)
+    for env, path in zip(envs, paths, strict=True):
+        target = plugin._target_dir(plugin.get_uris(env)[0])
+        expected_hash = plugin._hash_of(
+            project.compute_project_uri(spec.normalize(field), str(path))
+        )
+        assert plugin._pointer_of(target) == expected_hash
+        stored_manifest = os.path.join(plugin._env_root(target), "pixi.toml")
+        with open(stored_manifest) as f:
+            assert f.read() == (path / "pixi.toml").read_text()
+
+
+@pytest.mark.parametrize("has_working_dir", [False, True])
+def test_create_project_rejects_missing_request_context(
+    tmp_path, monkeypatch, has_working_dir
+):
+    import asyncio
+
+    # A global path belonging to another request must never be a fallback.
+    wd = _project_wd(tmp_path)
+    monkeypatch.setenv("RAY_RUNTIME_ENV_CREATE_WORKING_DIR", str(wd))
+    plugin = PixiPlugin(str(tmp_path / "res"))
+    env: dict = {"pixi": {"manifest": "pixi.toml"}}
+    if has_working_dir:
+        env["working_dir"] = "gcs://_ray_pkg_a.zip"
+    with pytest.raises(ValueError, match="working_dir"):
+        asyncio.run(plugin.create("pixi://test", env, _Ctx()))
 
 
 def test_create_does_not_block_event_loop(tmp_path, monkeypatch):
@@ -669,16 +757,15 @@ def test_modify_context_quotes_paths_with_spaces(tmp_path, monkeypatch):
     import ray_pixi.binary as binary_mod
     import ray_pixi.plugin as plugin_mod
 
-    _project_wd(tmp_path, monkeypatch)
+    ctx = _Ctx(_project_wd(tmp_path))
     plugin = PixiPlugin(str(tmp_path / "re s"))  # resource dir with a space
     runtime_env = {"pixi": {"manifest": "pixi.toml"}, "working_dir": "gcs://_a.zip"}
     uri = plugin.get_uris(runtime_env)[0]
     monkeypatch.setattr(plugin, "_resolve_pixi", lambda s, t: "/fake/pixi")
     monkeypatch.setattr(plugin_mod, "PixiProcessor", _env_creating_proc([]))
-    asyncio.run(plugin.create(uri, runtime_env, None, logging.getLogger("t")))
+    asyncio.run(plugin.create(uri, runtime_env, ctx, logging.getLogger("t")))
 
     monkeypatch.setattr(binary_mod, "resolve_pixi", lambda td, v: "/fake/pixi")
-    ctx = _Ctx()
     plugin.modify_context([uri], runtime_env, ctx, logging.getLogger("t"))
 
     tokens = shlex.split(ctx.py_executable)

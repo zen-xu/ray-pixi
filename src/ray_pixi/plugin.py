@@ -284,14 +284,13 @@ class PixiPlugin(RuntimeEnvPlugin):
         return await loop.run_in_executor(None, get_directory_size_bytes, target_dir)
 
     async def _create_project(
-        self, pixi_spec: spec.PixiSpec, target_dir: str, logger: logging.Logger
+        self,
+        pixi_spec: spec.PixiSpec,
+        target_dir: str,
+        logger: logging.Logger,
+        *,
+        working_dir: str,
     ) -> int:
-        # create runs inside Ray's with_working_dir_env context, so the
-        # working_dir is downloaded and its local path is exposed via the env
-        # var (unlike get_uris, which only sees the URI).
-        working_dir = project.resolve_working_dir()
-        if not working_dir:
-            raise ValueError("pixi project mode requires runtime_env['working_dir'].")
         loop = asyncio.get_running_loop()
 
         # The plugin URI is derived from the whole working_dir (get_uris cannot
@@ -350,7 +349,19 @@ class PixiPlugin(RuntimeEnvPlugin):
             if pixi_spec.source == "inline":
                 coro = self._create_inline(pixi_spec, target_dir, logger)
             else:
-                coro = self._create_project(pixi_spec, target_dir, logger)
+                if not runtime_env.get("working_dir"):
+                    raise ValueError(
+                        "pixi project mode requires runtime_env['working_dir']."
+                    )
+                working_dir = project.resolve_working_dir(context)
+                if not working_dir:
+                    raise ValueError(
+                        "pixi project mode requires a local working_dir in "
+                        "Ray's runtime env context."
+                    )
+                coro = self._create_project(
+                    pixi_spec, target_dir, logger, working_dir=working_dir
+                )
             self._creating_task[hash_val] = task = asyncio.create_task(coro)
             task.add_done_callback(lambda _: self._creating_task.pop(hash_val, None))
             size = await task
